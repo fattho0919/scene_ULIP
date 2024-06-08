@@ -10,5 +10,17 @@
         "train": "train",
         "test": "test",
         "usage": "test"
+    },
+    "s3dis": {
+        "config": "./data/s3dis.yaml",
+        "train": "train",
+        "test": "test",
+        "usage": "train"
+    },
+    "scannet": {
+        "config": "./data/scannet.yaml",
+        "train": "train",
+        "test": "test",
+        "usage": "train"
     }
 }

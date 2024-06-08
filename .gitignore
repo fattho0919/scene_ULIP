@@ -1,0 +1,4 @@
+data/s3dis
+data/scannet
+data/initialize_models
+__pycache__/

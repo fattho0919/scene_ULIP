@@ -1,0 +1,4 @@
+NAME: scannet
+DATA_PATH: data/scannet
+PC_PATH: data/scannet/pc
+IMAGE_PATH: data/scannet/images
