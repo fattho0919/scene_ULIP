@@ -88,11 +88,12 @@ def is_main_process():
 
 def save_on_master(state, is_best, output_dir):
     if is_main_process():
-        ckpt_path = '{}/checkpoint_{}.pt'.format(output_dir, state['epoch'])
+        # ckpt_path = '{}/checkpoint_{}.pt'.format(output_dir, state['epoch'])
         best_path = f'{output_dir}/checkpoint_best.pt'
-        torch.save(state, ckpt_path)
-        if is_best:
-            shutil.copyfile(ckpt_path, best_path)
+        # torch.save(state, ckpt_path)
+        torch.save(state, best_path)
+        # if is_best:
+        #     shutil.copyfile(ckpt_path, best_path)
 
 
 def init_distributed_mode(args):
@@ -107,7 +108,6 @@ def init_distributed_mode(args):
         print('Not using distributed mode')
         args.distributed = False
         return
-
     args.distributed = True
 
     torch.cuda.set_device(args.gpu)
@@ -237,6 +237,6 @@ class GaussianBlur(object):
         x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
         return x
 
-def get_dataset(train_transform, tokenizer, args, dataset_name=None):
-    dataset_3d = Dataset_3D(args, tokenizer, dataset_name, train_transform)
+def get_dataset(clip_preprocessor, tokenizer, args, dataset_name=None, level="scene"):
+    dataset_3d = Dataset_3D(args, tokenizer, dataset_name, clip_preprocessor, level)
     return dataset_3d.dataset
