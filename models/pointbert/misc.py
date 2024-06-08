@@ -37,10 +37,10 @@ def index_points(points, idx):
     new_points = points[batch_indices, idx, :]
     return new_points
 
-def fps(xyz, npoint):
+def fps(xyz, npoint=512):
     """
     Input:
-        xyz: pointcloud data, [B, N, 3]
+        xyz: pointcloud data, [B, N, 6]
         npoint: number of samples
     Return:
         centroids: sampled pointcloud index, [B, npoint]
@@ -53,8 +53,8 @@ def fps(xyz, npoint):
     batch_indices = torch.arange(B, dtype=torch.long).to(device)
     for i in range(npoint):
         centroids[:, i] = farthest
-        centroid = xyz[batch_indices, farthest, :].view(B, 1, 3)
-        dist = torch.sum((xyz - centroid) ** 2, -1)
+        centroid = xyz[batch_indices, farthest, :3].view(B, 1, 3)
+        dist = torch.sum((xyz[:, :, :3] - centroid) ** 2, -1)
         distance = torch.min(distance, dist)
         farthest = torch.max(distance, -1)[1]
     return index_points(xyz, centroids)

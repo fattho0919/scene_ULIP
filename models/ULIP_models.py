@@ -17,6 +17,7 @@ from data.dataset_3d import  *
 from models import losses
 from torch.nn.parameter import Parameter
 from easydict import EasyDict
+import open_clip
 
 
 class LayerNorm(nn.LayerNorm):
@@ -72,80 +73,87 @@ class ULIP_WITH_IMAGE(nn.Module):
     def __init__(self, point_encoder, **kwargs):
         # super().__init__(ssl_mlp_dim, ssl_emb_dim, **kwargs)
         super().__init__()
-        kwargs = EasyDict(kwargs)
-        self.context_length = kwargs.context_length
-        self.vision_width = kwargs.vision_width
-        self.visual = kwargs.vision_model
-
-        self.transformer = Transformer(
-            width=kwargs.transformer_width,
-            layers=kwargs.transformer_layers,
-            heads=kwargs.transformer_heads,
-            attn_mask=self.build_attention_mask(),
-        )
-
-        self.vocab_size = kwargs.vocab_size
-        self.token_embedding = nn.Embedding(kwargs.vocab_size, kwargs.transformer_width)
-        self.positional_embedding = nn.Parameter(torch.empty(self.context_length, kwargs.transformer_width))
-        self.ln_final = LayerNorm(kwargs.transformer_width)
-
-        self.image_projection = nn.Parameter(torch.empty(kwargs.vision_width, kwargs.embed_dim))
-        self.text_projection = nn.Parameter(torch.empty(kwargs.transformer_width, kwargs.embed_dim))
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-
-        self.initialize_parameters()
-
         self.point_encoder = point_encoder
+        kwargs = EasyDict(kwargs)
+        self.clip_model = kwargs.clip_model
+        
+        # kwargs = EasyDict(kwargs)
+        # self.context_length = kwargs.context_length
+        # self.vision_width = kwargs.vision_width
+        # self.visual = kwargs.vision_model
 
-        self.pc_projection = nn.Parameter(torch.empty(kwargs.pc_feat_dims, 512))
-        nn.init.normal_(self.pc_projection, std=512 ** -0.5)
+        # self.transformer = Transformer(
+        #     width=kwargs.transformer_width,
+        #     layers=kwargs.transformer_layers,
+        #     heads=kwargs.transformer_heads,
+        #     attn_mask=self.build_attention_mask(),
+        # )
+
+        # self.vocab_size = kwargs.vocab_size
+        # self.token_embedding = nn.Embedding(kwargs.vocab_size, kwargs.transformer_width)
+        # self.positional_embedding = nn.Parameter(torch.empty(self.context_length, kwargs.transformer_width))
+        # self.ln_final = LayerNorm(kwargs.transformer_width)
+
+        # self.image_projection = nn.Parameter(torch.empty(kwargs.vision_width, kwargs.embed_dim))
+        # self.text_projection = nn.Parameter(torch.empty(kwargs.transformer_width, kwargs.embed_dim))
+        # self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+        # self.initialize_parameters()
+
+        
+
+        # self.pc_projection = nn.Parameter(torch.empty(kwargs.pc_feat_dims, 512))
+        # nn.init.normal_(self.pc_projection, std=512 ** -0.5)
 
     def encode_image(self, image):
-        x = self.visual(image)
-        x = x @ self.image_projection
+        # x = self.visual(image)
+        # x = x @ self.image_projection
+        x = self.clip_model.encode_image(image)
 
         return x
 
     def encode_text(self, text):
-        x = self.token_embedding(text)  # [batch_size, n_ctx, d_model]
-        x = x + self.positional_embedding
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_final(x)
+        # x = self.token_embedding(text)  # [batch_size, n_ctx, d_model]
+        # x = x + self.positional_embedding
+        # x = x.permute(1, 0, 2)  # NLD -> LND
+        # x = self.transformer(x)
+        # x = x.permute(1, 0, 2)  # LND -> NLD
+        # x = self.ln_final(x)
 
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+        # # take features from the eot embedding (eot_token is the highest number in each sequence)
+        # x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+        x = self.clip_model.encode_text(text)
 
         return x
 
-    def build_attention_mask(self):
-        # lazily create causal attention mask, with full attention between the vision tokens
-        # pytorch uses additive attention mask; fill with -inf
-        mask = torch.empty(self.context_length, self.context_length)
-        mask.fill_(float("-inf"))
-        mask.triu_(1)  # zero out the lower diagonal
-        return mask
+    # def build_attention_mask(self):
+    #     # lazily create causal attention mask, with full attention between the vision tokens
+    #     # pytorch uses additive attention mask; fill with -inf
+    #     mask = torch.empty(self.context_length, self.context_length)
+    #     mask.fill_(float("-inf"))
+    #     mask.triu_(1)  # zero out the lower diagonal
+    #     return mask
 
-    def initialize_parameters(self):
-        nn.init.normal_(self.token_embedding.weight, std=0.02)
-        nn.init.normal_(self.positional_embedding, std=0.01)
+    # def initialize_parameters(self):
+    #     nn.init.normal_(self.token_embedding.weight, std=0.02)
+    #     nn.init.normal_(self.positional_embedding, std=0.01)
 
-        proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
-        attn_std = self.transformer.width ** -0.5
-        fc_std = (2 * self.transformer.width) ** -0.5
-        for block in self.transformer.resblocks:
-            nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
-            nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
-            nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
-            nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
+    #     proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
+    #     attn_std = self.transformer.width ** -0.5
+    #     fc_std = (2 * self.transformer.width) ** -0.5
+    #     for block in self.transformer.resblocks:
+    #         nn.init.normal_(block.attn.in_proj_weight, std=attn_std)
+    #         nn.init.normal_(block.attn.out_proj.weight, std=proj_std)
+    #         nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
+    #         nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
 
-        nn.init.normal_(self.image_projection, std=self.vision_width ** -0.5)
-        nn.init.normal_(self.text_projection, std=self.transformer.width ** -0.5)
+    #     nn.init.normal_(self.image_projection, std=self.vision_width ** -0.5)
+    #     nn.init.normal_(self.text_projection, std=self.transformer.width ** -0.5)
 
     def encode_pc(self, pc):
         pc_feat = self.point_encoder(pc)
-        pc_embed = pc_feat @ self.pc_projection
+        # pc_embed = pc_feat @ self.pc_projection
+        pc_embed = pc_feat
         return pc_embed
 
     def forward(self, pc, text, image=None):
@@ -160,18 +168,24 @@ class ULIP_WITH_IMAGE(nn.Module):
             text_embed_all.append(text_embed)
 
         text_embed_all = torch.stack(text_embed_all)
+        # text_embed_all = []
+        # for i in range(text.shape[0]):
+        #     text_embed = self.encode_text(text)
+        #     text_embed_all.append(text_embed)
+        # text_embed_all = torch.stack(text_embed_all)
+
         pc_embed = self.encode_pc(pc)
         if image is not None:
             image_embed = self.encode_image(image)
             return {'text_embed': text_embed_all,
                     'pc_embed': pc_embed,
                     'image_embed': image_embed,
-                    'logit_scale': self.logit_scale.exp()}
+                    'logit_scale': self.clip_model.logit_scale.exp()}
 
         else:
             return {'text_embed': text_embed_all,
                     'pc_embed': pc_embed,
-                    'logit_scale': self.logit_scale.exp()}
+                    'logit_scale': self.clip_model.logit_scale.exp()}
 
 
 def get_loss(args):
@@ -182,7 +196,7 @@ def get_metric_names(model):
     return ['loss', 'ulip_loss', 'ulip_pc_image_acc', 'ulip_pc_text_acc']
 
 
-def ULIP_PN_SSG(args):
+def ULIP_PN_SSG(args, clip_model):
     vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
 
     # =====================================================================
@@ -212,12 +226,12 @@ def ULIP_PN_SSG(args):
                 param_new = pretrain_slip_model_params[name]
 
             param.requires_grad = False
-            print('load {} and freeze'.format(name))
+            # print('load {} and freeze'.format(name))
             param.data.copy_(param_new)
 
     return model
 
-def ULIP_PN_MLP(args):
+def ULIP_PN_MLP(args, clip_model):
     vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
 
     # =====================================================================
@@ -248,13 +262,13 @@ def ULIP_PN_MLP(args):
                 param_new = pretrain_slip_model_params[name]
 
             param.requires_grad = False
-            print('load {} and freeze'.format(name))
+            # print('load {} and freeze'.format(name))
             param.data.copy_(param_new)
 
     return model
 
-def ULIP_PointBERT(args):
-    vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
+def ULIP_PointBERT(args, clip_model):
+    # vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
 
     # =====================================================================
     # import the 3D backbone and specify the output point cloud feature dimension
@@ -265,33 +279,37 @@ def ULIP_PointBERT(args):
     pc_feat_dims = 768
     # =====================================================================
 
-    model = ULIP_WITH_IMAGE(embed_dim=512, vision_width=768, point_encoder=point_encoder, vision_model=vision_model,
+    model = ULIP_WITH_IMAGE(embed_dim=512, vision_width=768, point_encoder=point_encoder, clip_model=clip_model,
                             context_length=77, vocab_size=49408,
                             transformer_width=512, transformer_heads=8, transformer_layers=12, pc_feat_dims=pc_feat_dims)
 
     if not args.evaluate_3d:
-        # load the pretrained model
-        pretrain_slip_model = torch.load('./data/initialize_models/slip_base_100ep.pt', map_location=torch.device('cpu'))
-        pretrain_slip_model_params = pretrain_slip_model['state_dict']
-        pretrain_slip_model_params = {param_name.replace('module.', ''): param for param_name, param in
-                                      pretrain_slip_model_params.items()}
-
         for name, param in model.named_parameters():
-            if name not in pretrain_slip_model_params:
-                continue
+            if 'point_encoder' not in name:
+                param.requires_grad = False
 
-            if isinstance(pretrain_slip_model_params[name], Parameter):
-                param_new = pretrain_slip_model_params[name].data
-            else:
-                param_new = pretrain_slip_model_params[name]
+        # # load the pretrained model
+        # pretrain_slip_model = torch.load('./data/initialize_models/slip_base_100ep.pt', map_location=torch.device('cpu'))
+        # pretrain_slip_model_params = pretrain_slip_model['state_dict']
+        # pretrain_slip_model_params = {param_name.replace('module.', ''): param for param_name, param in
+        #                               pretrain_slip_model_params.items()}
 
-            param.requires_grad = False
-            print('load {} and freeze'.format(name))
-            param.data.copy_(param_new)
+        # for name, param in model.named_parameters():
+        #     if name not in pretrain_slip_model_params:
+        #         continue
+
+        #     if isinstance(pretrain_slip_model_params[name], Parameter):
+        #         param_new = pretrain_slip_model_params[name].data
+        #     else:
+        #         param_new = pretrain_slip_model_params[name]
+
+        #     param.requires_grad = False
+        #     # print('load {} and freeze'.format(name))
+        #     param.data.copy_(param_new)
 
     return model
 
-def ULIP_PN_NEXT(args):
+def ULIP_PN_NEXT(args, clip_model):
     vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
 
     # =====================================================================
@@ -322,13 +340,13 @@ def ULIP_PN_NEXT(args):
                 param_new = pretrain_slip_model_params[name]
 
             param.requires_grad = False
-            print('load {} and freeze'.format(name))
+            # print('load {} and freeze'.format(name))
             param.data.copy_(param_new)
 
     return model
 
 
-def ULIP_CUSTOMIZED(args):
+def ULIP_CUSTOMIZED(args, clip_model):
     vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
 
     # =====================================================================
@@ -362,7 +380,7 @@ def ULIP_CUSTOMIZED(args):
                 param_new = pretrain_slip_model_params[name]
 
             param.requires_grad = False
-            print('load {} and freeze'.format(name))
+            # print('load {} and freeze'.format(name))
             param.data.copy_(param_new)
 
     return model
