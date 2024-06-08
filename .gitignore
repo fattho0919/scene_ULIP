@@ -3,3 +3,4 @@ data/scannet
 data/initialize_models
 __pycache__/
 wandb/
+outputs/

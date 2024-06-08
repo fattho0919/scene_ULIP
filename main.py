@@ -96,8 +96,8 @@ def main(args):
     global best_acc1
 
     if utils.is_main_process() and args.wandb:
-        wandb_id = os.path.split(args.output_dir)[-1]
-        wandb.init(project='ULIP', id=wandb_id, config=args, reinit=True, entity='wangfatho')
+        # wandb_id = os.path.split(args.output_dir)[-1]
+        wandb.init(project='ULIP', config=args, reinit=True, entity='wangfatho')
 
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
