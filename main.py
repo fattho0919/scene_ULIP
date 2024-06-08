@@ -13,6 +13,7 @@ import math
 import time
 import wandb
 import open_clip
+from itertools import cycle
 
 import torch.cuda.amp as amp
 import torch.nn.parallel
@@ -177,15 +178,6 @@ def main(args):
 
     # Data loading code
     print("=> creating dataset")
-    # tokenizer = SimpleTokenizer()
-    # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-    #                                  std=[0.229, 0.224, 0.225])
-    # train_transform = transforms.Compose([
-    #         transforms.RandomResizedCrop(224, scale=(0.5, 1.0)),
-    #         transforms.ToTensor(),
-    #         normalize
-    #     ])
-
     s3dis_entity_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 's3dis', "entity")
     s3dis_view_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 's3dis', "view")
     s3dis_scene_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 's3dis', "scene")
@@ -193,23 +185,13 @@ def main(args):
     scannet_view_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 'scannet', "view")
     scannet_scene_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 'scannet', "scene")
 
-
-    if args.distributed:
-        s3dis_entity_train_sampler = torch.utils.data.distributed.DistributedSampler(s3dis_entity_train_dataset)
-        s3dis_view_train_sampler = torch.utils.data.distributed.DistributedSampler(s3dis_view_train_dataset)
-        s3dis_scene_train_sampler = torch.utils.data.distributed.DistributedSampler(s3dis_scene_train_dataset)
-        scannet_entity_train_sampler = torch.utils.data.distributed.DistributedSampler(scannet_entity_train_dataset)
-        scannet_view_train_sampler = torch.utils.data.distributed.DistributedSampler(scannet_view_train_dataset)
-        scannet_scene_train_sampler = torch.utils.data.distributed.DistributedSampler(scannet_scene_train_dataset)
-        # val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
-    else:
-        s3dis_entity_train_sampler = None
-        s3dis_view_train_sampler = None
-        s3dis_scene_train_sampler = None
-        scannet_entity_train_sampler = None
-        scannet_view_train_sampler = None
-        scannet_scene_train_sampler = None
-        # val_sampler = None
+    s3dis_entity_train_sampler = None
+    s3dis_view_train_sampler = None
+    s3dis_scene_train_sampler = None
+    scannet_entity_train_sampler = None
+    scannet_view_train_sampler = None
+    scannet_scene_train_sampler = None
+    # val_sampler = None
 
     s3dis_entity_train_loader = torch.utils.data.DataLoader(
         s3dis_entity_train_dataset, batch_size=args.batch_size, shuffle=(s3dis_entity_train_sampler is None),
@@ -236,14 +218,38 @@ def main(args):
         num_workers=args.workers, pin_memory=True, sampler=scannet_scene_train_sampler, drop_last=True,
     )
     
-    # train_loader = torch.utils.data.DataLoader(
-    #     train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-    #     num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True
-    # )
-
-    # val_loader = torch.utils.data.DataLoader(
-    #     val_dataset, batch_size=args.batch_size, shuffle=(val_sampler is None),
-    #     num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=False)
+    
+    class CustomDataLoader:
+        def __init__(self, dataloaders):
+            self.dataloaders = dataloaders
+            self.dataloader_iters = [iter(dataloader) for dataloader in dataloaders]
+            self.current_dataloader_index = -1
+            self.cycle_count = 0
+            self.exhausted_dataloaders = set()
+        
+        def select_dataloader(self):
+            if self.current_dataloader_index in self.exhausted_dataloaders or self.cycle_count == 0:
+                available_dataloaders = [i for i in range(len(self.dataloaders)) if i not in self.exhausted_dataloaders]
+                if not available_dataloaders:
+                    raise ValueError("All dataloaders are exhausted")
+                self.current_dataloader_index = random.choice(available_dataloaders)
+                self.cycle_count = 4
+            return self.dataloader_iters[self.current_dataloader_index]
+        
+        def mark_dataloader_exhausted(self):
+            self.exhausted_dataloaders.add(self.current_dataloader_index)
+        
+        def get_data(self):
+            dataloader_iter = self.select_dataloader()
+            batch_list = []
+            try:
+                for _ in range(4):
+                    batch_list.append(next(dataloader_iter))
+                    self.cycle_count -= 1
+            except StopIteration:
+                self.mark_dataloader_exhausted()
+                return self.get_data()  # 如果 dataloader 用完，重新獲取數據
+            return batch_list
 
     lr_schedule = utils.cosine_scheduler(args.lr, args.lr_end, args.epochs,
         (len(s3dis_entity_train_loader) + len(s3dis_view_train_loader) + len(s3dis_scene_train_loader) + len(scannet_entity_train_loader) + len(scannet_view_train_loader) + len(scannet_scene_train_loader)) // args.update_freq, warmup_epochs=args.warmup_epochs, start_warmup_value=args.lr_start)
@@ -253,26 +259,23 @@ def main(args):
     best_epoch = -1
 
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            s3dis_entity_train_sampler.set_epoch(epoch)
-            s3dis_view_train_sampler.set_epoch(epoch)
-            s3dis_scene_train_sampler.set_epoch(epoch)
-            scannet_entity_train_sampler.set_epoch(epoch)
-            scannet_view_train_sampler.set_epoch(epoch)
-            scannet_scene_train_sampler.set_epoch(epoch)
 
-        print("=> beginning s3dis_entity training")
-        s3dis_entity_train_stats = train(s3dis_entity_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'entity', args)
-        print("=> beginning scannet_entity training")
-        scannet_entity_train_stats = train(scannet_entity_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'entity', args)
-        print("=> beginning s3dis_view training")
-        s3dis_view_train_stats = train(s3dis_view_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'view', args)
-        print("=> beginning scannet_view training")
-        scannet_view_train_stats = train(scannet_view_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'view', args)
-        print("=> beginning s3dis_scene training")
-        s3dis_scene_train_stats = train(s3dis_scene_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'scene', args)
-        print("=> beginning scannet_scene training")
-        scannet_scene_train_stats = train(scannet_scene_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'scene', args)
+        all_in_one_train_loader = CustomDataLoader([s3dis_entity_train_loader, s3dis_view_train_loader, s3dis_scene_train_loader, scannet_entity_train_loader, scannet_view_train_loader, scannet_scene_train_loader])
+        print("=> beginning all_in_one training")
+        all_in_one_train_stats = train(all_in_one_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, args)
+
+        # print("=> beginning s3dis_entity training")
+        # s3dis_entity_train_stats = train(s3dis_entity_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'entity', args)
+        # print("=> beginning scannet_entity training")
+        # scannet_entity_train_stats = train(scannet_entity_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'entity', args)
+        # print("=> beginning s3dis_view training")
+        # s3dis_view_train_stats = train(s3dis_view_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'view', args)
+        # print("=> beginning scannet_view training")
+        # scannet_view_train_stats = train(scannet_view_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'view', args)
+        # print("=> beginning s3dis_scene training")
+        # s3dis_scene_train_stats = train(s3dis_scene_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'scene', args)
+        # print("=> beginning scannet_scene training")
+        # scannet_scene_train_stats = train(scannet_scene_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'scene', args)
 
         # val_stats = {"acc1": -1}
 
@@ -310,15 +313,22 @@ def main(args):
                     'args': args,
                 }, True, args.output_dir)
 
-        log_stats = {**{f's3dis_entity_train_{k}': v for k, v in s3dis_entity_train_stats.items()},
-                    **{f's3dis_view_train_{k}': v for k, v in s3dis_view_train_stats.items()},
-                    **{f's3dis_scene_train_{k}': v for k, v in s3dis_scene_train_stats.items()},
-                    **{f'scannet_entity_train_{k}': v for k, v in scannet_entity_train_stats.items()},
-                    **{f'scannet_view_train_{k}': v for k, v in scannet_view_train_stats.items()},
-                    **{f'scannet_scene_train_{k}': v for k, v in scannet_scene_train_stats.items()},
-                     'epoch': epoch,
-                    #  'best_acc1': best_acc1,
-                     'best_epoch': best_epoch}
+        # log_stats = {**{f's3dis_entity_train_{k}': v for k, v in s3dis_entity_train_stats.items()},
+        #             **{f's3dis_view_train_{k}': v for k, v in s3dis_view_train_stats.items()},
+        #             **{f's3dis_scene_train_{k}': v for k, v in s3dis_scene_train_stats.items()},
+        #             **{f'scannet_entity_train_{k}': v for k, v in scannet_entity_train_stats.items()},
+        #             **{f'scannet_view_train_{k}': v for k, v in scannet_view_train_stats.items()},
+        #             **{f'scannet_scene_train_{k}': v for k, v in scannet_scene_train_stats.items()},
+        #              'epoch': epoch,
+        #             #  'best_acc1': best_acc1,
+        #              'best_epoch': best_epoch}
+        
+        log_stats = {
+            **{f'all_in_one_train_{k}': v for k, v in all_in_one_train_stats.items()},
+            'epoch': epoch,
+            # 'best_acc1': best_acc1,
+            'best_epoch': best_epoch
+        }
 
         if utils.is_main_process():
             if args.wandb:
@@ -328,64 +338,70 @@ def main(args):
                 f.write(json.dumps(log_stats) + '\n')
 
 
-def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, level, args):
+def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, args):
     batch_time = AverageMeter('Time', ':6.2f')
     data_time = AverageMeter('Data', ':6.2f')
     mem = AverageMeter('Mem (GB)', ':6.1f')
     metric_names = models.get_metric_names(args.model)
-    iters_per_epoch = len(train_loader) // args.update_freq
+    iters_per_epoch = 0
+    for dataloader in train_loader.dataloaders:
+        iters_per_epoch += len(dataloader)
+    iters_per_epoch //= 4
     metrics = OrderedDict([(name, AverageMeter(name, ':.2e')) for name in metric_names])
     progress = ProgressMeter(
         iters_per_epoch,
         [batch_time, data_time, mem, *metrics.values()],
         prefix="Epoch: [{}]".format(epoch))
-    if level == 'view':
-        outputs = {k: [] for k in ['pc_embed', 'text_embed', 'image_embed', 'logit_scale']}
-    else:
-        outputs = {k: [] for k in ['pc_embed', 'text_embed', 'logit_scale']}
+    outputs = {}
 
     # switch to train mode
     model.train()
 
     end = time.time()
-    for data_iter, inputs in enumerate(train_loader):
-        optim_iter = data_iter // args.update_freq
+    for data_iter in range(iters_per_epoch):
+        inputs_list = train_loader.get_data()
+        for inputs in inputs_list:
+            optim_iter = data_iter // args.update_freq
 
-        # measure data loading time
-        data_time.update(time.time() - end)
+            # measure data loading time
+            data_time.update(time.time() - end)
 
-        # update weight decay and learning rate according to their schedule
-        it = iters_per_epoch * epoch + optim_iter  # global training iteration
-        for k, param_group in enumerate(optimizer.param_groups):
-            param_group['lr'] = lr_schedule[it]
+            # update weight decay and learning rate according to their schedule
+            it = iters_per_epoch * epoch + optim_iter  # global training iteration
+            for k, param_group in enumerate(optimizer.param_groups):
+                param_group['lr'] = lr_schedule[it]
 
-        pc = inputs[1]
-        texts = inputs[0]
+            pc = inputs[1]
+            texts = inputs[0]
 
-        if level == 'view':
-            image = inputs[2]
-            inputs = [pc, texts, image]
-        else:
-            inputs = [pc, texts]
+            if train_loader.current_dataloader_index == 1 or train_loader.current_dataloader_index == 4:
+                image = inputs[2]
+                inputs = [pc, texts, image]
+            else:
+                inputs = [pc, texts]
 
-        inputs = [tensor.cuda(args.gpu, non_blocking=True) for tensor in inputs]
+            inputs = [tensor.cuda(args.gpu, non_blocking=True) for tensor in inputs]
 
-        # compute output
-        with amp.autocast(enabled=not args.disable_amp):
-            try:
-                output = model(*inputs)
-            except Exception as e:
-                print_log("Error: {}".format(e))
-                continue
-            for k in output.keys():
-                outputs[k].append(output[k])
-            if (data_iter+1)  % 4 != 0:
-                continue
-            outputs = {k: torch.stack(outputs[k], dim=0).squeeze() for k in outputs}
-            loss_dict = criterion(outputs, level)
-            loss = loss_dict['loss']
-            # loss /= args.update_freq
-            outputs = {k: [] for k in outputs}
+            # compute output
+            with amp.autocast(enabled=not args.disable_amp):
+                try:
+                    output = model(*inputs)
+                except Exception as e:
+                    print_log("Error: {}".format(e))
+                    continue
+                for k in output.keys():
+                    if k not in outputs:
+                        outputs[k] = []
+                    outputs[k].append(output[k].to(torch.float32))
+                    
+        if len(outputs['pc_embed']) % 4 != 0:
+            outputs = {}
+            continue
+        outputs = {k: torch.stack(outputs[k], dim=0).squeeze() for k in outputs}
+        loss_dict = criterion(outputs, train_loader.current_dataloader_index)
+        loss = loss_dict['loss']
+        # loss /= args.update_freq
+        outputs = {}
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()))

@@ -140,8 +140,15 @@ class PointTransformer(nn.Module):
         self.norm = nn.LayerNorm(self.trans_dim)
         # self.load_model_from_ckpt('/export/home/repos/SLIP/pretrained_models/point_transformer_8192.pt')
         if not self.args.evaluate_3d:
-            self.load_model_from_ckpt('./data/initialize_models/point_bert_pretrained.pt')
-            print('Point-BERT pretrained model loaded')
+            try:
+                self.load_model_from_ckpt('./data/initialize_models/point_bert_pretrained.pt')
+                print('Point-BERT pretrained model loaded')
+            except Exception as e:
+                print(e)
+                print('-'*40)
+                print('Point-BERT pretrained model is going to train from scratch')
+                
+        
 
         # self.cls_head_finetune = nn.Sequential(
         #     nn.Linear(self.trans_dim * 2, 256),

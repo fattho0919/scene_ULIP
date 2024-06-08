@@ -438,6 +438,228 @@ class scannet(data.Dataset):
     def __len__(self):
         return len(self.annos)
 
+# @DATASETS.register_module()
+# class all_in_one(data.Dataset):
+#     def __init__(self, config):
+#         self.s3dis_data_root = "data/s3dis"
+#         self.scannet_data_root = "data/scannet"
+
+#         self.s3dis_entity_mapping_path = os.path.join(self.s3dis_data_root, f"s3dis_entity_vit-gpt2_matching_idx")
+#         self.s3dis_view_mapping_path = os.path.join(self.s3dis_data_root, f"s3dis_view_vit-gpt2_matching_idx")
+
+#         self.scannet_entity_mapping_file = os.path.join(self.scannet_data_root, f"scannetv2_entity_vit-gpt2_matching_idx.pickle")
+#         self.scannet_view_mapping_file = os.path.join(self.scannet_data_root, f"scannetv2_view_vit-gpt2_matching_idx.pickle")
+        
+#         self.s3dis_pc_path = os.path.join(self.s3dis_data_root, "pc")
+#         self.s3dis_image_path = os.path.join(self.s3dis_data_root, "images")
+#         self.scannet_pc_path = os.path.join(self.scannet_data_root, "pc")
+#         self.scannet_image_path = os.path.join(self.scannet_data_root, "images")
+
+#         self.tokenizer = config.tokenizer
+#         self.clip_preprocessor = config.clip_preprocessor
+#         self.rendered_image_addr = config.IMAGE_PATH
+#         self.data_list_dict = {
+#             "s3dis_entity":[],
+#             "s3dis_view":[],
+#             "s3dis_scene":[],
+#             "scannet_entity":[],
+#             "scannet_view":[],
+#             "scannet_scene":[]
+#         }
+
+#         self.s3dis_entity_data_list_file = os.path.join(self.s3dis_data_root, f's3dis_entity_list.json')
+#         self.s3dis_view_data_list_file = os.path.join(self.s3dis_data_root, f's3dis_view_list.json')
+#         self.s3dis_scene_data_list_file = os.path.join(self.s3dis_data_root, f's3dis_scene_list.json')
+#         self.scannet_entity_data_list_file = os.path.join(self.scannet_data_root, f'scannet_entity_list.json')
+#         self.scannet_view_data_list_file = os.path.join(self.scannet_data_root, f'scannet_view_list.json')
+#         self.scannet_scene_data_list_file = os.path.join(self.scannet_data_root, f'scannet_scene_list.json')
+
+#         self.data_length = 0
+
+#         with open(self.s3dis_entity_data_list_file, 'r') as f:
+#             print_log(f'[DATASET] Open file {self.s3dis_entity_data_list_file}', logger='S3DIS')
+#             self.data_list_dict["s3dis_entity"] = random.shuffle(json.load(f))
+#             self.data_length += len(self.data_list_dict["s3dis_entity"])
+#             print_log(f'[DATASET] {len(self.data_list_dict["s3dis_entity"])} instances were loaded', logger='S3DIS')
+            
+#         with open(self.s3dis_view_data_list_file, 'r') as f:
+#             print_log(f'[DATASET] Open file {self.s3dis_view_data_list_file}', logger='S3DIS')
+#             self.data_list_dict["s3dis_view"] = random.shuffle(json.load(f))
+#             self.data_length += len(self.data_list_dict["s3dis_view"])
+#             print_log(f'[DATASET] {len(self.data_list_dict["s3dis_view"])} instances were loaded', logger='S3DIS')
+
+#         with open(self.s3dis_scene_data_list_file, 'r') as f:
+#             print_log(f'[DATASET] Open file {self.s3dis_scene_data_list_file}', logger='S3DIS')
+#             self.data_list_dict["s3dis_scene"] = random.shuffle(json.load(f))
+#             self.data_length += len(self.data_list_dict["s3dis_scene"])
+#             print_log(f'[DATASET] {len(self.data_list_dict["s3dis_scene"])} instances were loaded', logger='S3DIS')
+
+#         with open(self.scannet_entity_data_list_file, 'r') as f:
+#             print_log(f'[DATASET] Open file {self.scannet_entity_data_list_file}', logger='SCANNET')
+#             self.data_list_dict["scannet_entity"] = random.shuffle(json.load(f))
+#             self.data_length += len(self.data_list_dict["scannet_entity"])
+#             print_log(f'[DATASET] {len(self.data_list_dict["scannet_entity"])} instances were loaded', logger='SCANNET')
+
+#         with open(self.scannet_view_data_list_file, 'r') as f:
+#             print_log(f'[DATASET] Open file {self.scannet_view_data_list_file}', logger='SCANNET')
+#             self.data_list_dict["scannet_view"] = random.shuffle(json.load(f))
+#             self.data_length += len(self.data_list_dict["scannet_view"])
+#             print_log(f'[DATASET] {len(self.data_list_dict["scannet_view"])} instances were loaded', logger='SCANNET')
+
+#         with open(self.scannet_scene_data_list_file, 'r') as f:
+#             print_log(f'[DATASET] Open file {self.scannet_scene_data_list_file}', logger='SCANNET')
+#             self.data_list_dict["scannet_scene"] = random.shuffle(json.load(f))
+#             self.data_length += len(self.data_list_dict["scannet_scene"])
+#             print_log(f'[DATASET] {len(self.data_list_dict["scannet_scene"])} instances were loaded', logger='SCANNET')
+
+#         # *---- if the mapping dict exists, load it; otherwise, construct it ----*
+#         if os.path.exists(os.path.join(self.s3dis_data_root, f'entity_mapping_dict.pkl')):
+#             print_log(f'[DATASET] Loading s3dis entity mapping dict', logger='S3DIS')
+#             with open(f'{self.s3dis_data_root}/entity_mapping_dict.pkl', 'rb') as pickle_file:
+#                 self.s3dis_entity_mapping_dict = pickle.load(pickle_file)
+#         else:
+#             print_log(f'[DATASET] Constructing s3dis entity mapping dict', logger='S3DIS')
+#             self.s3dis_entity_mapping_dict = {}
+#             for anno in self.data_list_dict["s3dis_entity"]:
+#                 if anno['scene_id'] not in self.s3dis_entity_mapping_dict:
+#                     mapping_file = os.path.join(self.s3dis_entity_mapping_path, f"{anno['scene_id']}.pickle")
+#                     with open(mapping_file, 'rb') as f:
+#                         mapping_idx = pickle.load(f)
+#                     for k,v in mapping_idx.items():
+#                         self.s3dis_entity_mapping_dict[k] = v
+#             with open(f'{self.s3dis_data_root}/entity_mapping_dict.pkl', 'wb') as pickle_file:
+#                 pickle.dump(self.s3dis_entity_mapping_dict, pickle_file)
+
+#         if os.path.exists(os.path.join(self.s3dis_data_root, f'view_mapping_dict.pkl')):
+#             print_log(f'[DATASET] Loading s3dis view mapping dict', logger='S3DIS')
+#             with open(f'{self.s3dis_data_root}/view_mapping_dict.pkl', 'rb') as pickle_file:
+#                 self.s3dis_view_mapping_dict = pickle.load(pickle_file)
+#         else:
+#             print_log(f'[DATASET] Constructing s3dis view mapping dict', logger='S3DIS')
+#             self.s3dis_view_mapping_dict = {}
+#             for anno in self.data_list_dict["s3dis_view"]:
+#                 if anno['scene_id'] not in self.s3dis_view_mapping_dict:
+#                     mapping_file = os.path.join(self.s3dis_view_mapping_path, f"{anno['scene_id']}.pickle")
+#                     with open(mapping_file, 'rb') as f:
+#                         mapping_idx = pickle.load(f)
+#                     for k,v in mapping_idx.items():
+#                         self.s3dis_view_mapping_dict[k] = v
+#             with open(f'{self.s3dis_data_root}/view_mapping_dict.pkl', 'wb') as pickle_file:
+#                 pickle.dump(self.s3dis_view_mapping_dict, pickle_file)
+
+#         if os.path.exists(os.path.join(self.scannet_data_root, f'entity_mapping_dict.pkl')):
+#             print_log(f'[DATASET] Loading scannet entity mapping dict', logger='SCANNET')
+#             with open(f'{self.scannet_data_root}/entity_mapping_dict.pkl', 'rb') as pickle_file:
+#                 self.scannet_entity_mapping_dict = pickle.load(pickle_file)
+#         else:
+#             print_log(f'[DATASET] Constructing scannet entity mapping dict', logger='SCANNET')
+#             with open(self.scannet_entity_mapping_file, 'rb') as f:
+#                 self.scannet_entity_mapping_dict = pickle.load(f)
+#             with open(f'{self.scannet_data_root}/entity_mapping_dict.pkl', 'wb') as pickle_file:
+#                 pickle.dump(self.scannet_entity_mapping_dict, pickle_file)
+
+#         if os.path.exists(os.path.join(self.scannet_data_root, f'view_mapping_dict.pkl')):
+#             print_log(f'[DATASET] Loading scannet view mapping dict', logger='SCANNET')
+#             with open(f'{self.scannet_data_root}/view_mapping_dict.pkl', 'rb') as pickle_file:
+#                 self.scannet_view_mapping_dict = pickle.load(pickle_file)
+#         else:
+#             print_log(f'[DATASET] Constructing scannet view mapping dict', logger='SCANNET')
+#             with open(self.scannet_view_mapping_file, 'rb') as f:
+#                 self.scannet_view_mapping_dict = pickle.load(f)
+#             with open(f'{self.scannet_data_root}/view_mapping_dict.pkl', 'wb') as pickle_file:
+#                 pickle.dump(self.scannet_view_mapping_dict, pickle_file)
+
+#         self.uniform = True
+#         self.augment = False
+#         self.use_caption_templates = False
+#         # =================================================
+#         # TODO: disable for backbones except for PointNEXT!!!
+#         self.use_height = config.use_height
+#         # =================================================
+
+#         if self.augment:
+#             print_log(f'[DATASET] Using augmented point clouds', logger='S3DIS')
+
+#     def pc_norm(self, pc):
+#         """ pc: NxC, return NxC """
+#         centroid = np.mean(pc, axis=0)
+#         pc = pc - centroid
+#         m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
+#         pc = pc / m
+#         return pc
+
+#     def random_sample(self, pc, num):
+#         np.random.shuffle(self.permutation)
+#         pc = pc[self.permutation[:num]]
+#         return pc
+
+#     def __getitem__(self, idx):
+#         level = random.choice(self.data_list_dict.keys())
+#         sample = self.data_list_dict[level][idx]
+
+#         sample = self.annos[idx]
+
+#         pc = IO.get(os.path.join(self.pc_path, f"{sample['scene_id']}.npy")).astype(np.float16)
+#         if self.level != 'scene':
+#             try:
+#                 pc = pc[self.mapping_dict[sample['id']]]
+#             except Exception as e:
+#                 print(e)
+#                 pc = pc[:len(self.mapping_dict[sample['id']])]
+
+#         if self.augment:
+#             pc = random_point_dropout(pc[None, ...])
+#             pc = random_scale_point_cloud(pc)
+#             pc = shift_point_cloud(pc)
+#             pc = rotate_perturbation_point_cloud(pc)
+#             pc = rotate_point_cloud(pc)
+#             pc = pc.squeeze()
+
+#         # 這邊gravity_dim是1代表它假設y軸是重力方向，所以會把y軸的值減掉最小值，這樣就會讓y軸的值變成正值，也就是高度
+#         # s3dis和scannet都是z軸是重力方向，所以這邊要改成2
+#         if self.use_height:
+#             print_log(f'[DATASET] Using height', logger='S3DIS')
+#             self.gravity_dim = 2
+#             height_array = pc[:, self.gravity_dim:self.gravity_dim + 1] - pc[:,
+#                                                                        self.gravity_dim:self.gravity_dim + 1].min()
+#             pc = np.concatenate((pc, height_array), axis=1)
+#             pc = torch.from_numpy(pc).to(torch.bfloat16)
+#         else:
+#             pc = torch.from_numpy(pc).to(torch.bfloat16)
+
+#         captions = sample['conversations'][1]['value']
+#         # captions = [caption.strip() for caption in captions.split(',') if caption.strip()]
+#         # caption = random.choice(captions)
+#         # captions = []
+#         tokenized_captions = []
+#         if self.use_caption_templates:
+#             print("use caption templates")
+#             for template in self.templates:
+#                 caption = template.format(caption)
+#                 captions.append(caption)
+#                 tokenized_captions.append(self.tokenizer(caption))
+#         else:
+#             # tokenized_captions.append(self.tokenizer(caption))
+#             tokenized_captions = self.tokenizer(captions)
+
+#         # tokenized_captions = torch.stack(tokenized_captions)
+#         # print(tokenized_captions.size())
+
+#         if self.level == 'view':
+#             image_dir = os.path.join(self.image_path, f"{sample['id']}.png")
+#             try:
+#                 image = pil_loader(image_dir)
+#                 image = self.clip_preprocessor(image)
+#             except:
+#                 raise ValueError("image is corrupted: {}".format(image_dir))
+
+#             return tokenized_captions, pc, image
+#         else:
+#             return tokenized_captions, pc
+
+#     def __len__(self):
+#         return self.data_length
+
 import collections.abc as container_abcs
 int_classes = int
 from torch._six import string_classes
@@ -513,6 +735,33 @@ def cfg_from_yaml_file(cfg_file):
         new_config = yaml.load(f, Loader=yaml.FullLoader)
     merge_new_config(config=config, new_config=new_config)
     return config
+
+# class all_in_one_Dataset_3D():
+#     def __init__(self, args, tokenizer, clip_preprocessor=None):
+#         # if dataset_type == 'train':
+#         #     self.dataset_name = args.pretrain_dataset_name
+#         # elif dataset_type == 'val':
+#         #     self.dataset_name = args.validate_dataset_name
+#         # else:
+#         #     raise ValueError("not supported dataset type.")
+#         with open('./data/dataset_catalog.json', 'r') as f:
+#             self.dataset_catalog = json.load(f)
+#             self.dataset_usage = 'train' # train or val
+#             self.dataset_split = 'train' # dataset_catalog[dataset_name]["train" / "val"]
+#             self.dataset_config_dir = './data/dataset_configs/3d/all_in_one.yaml'
+#         self.tokenizer = tokenizer
+#         self.clip_preprocessor = clip_preprocessor
+#         self.build_3d_dataset(args, self.dataset_config_dir)
+
+#     def build_3d_dataset(self, args, config):
+#         config = cfg_from_yaml_file(config)
+#         config.tokenizer = self.tokenizer
+#         config.clip_preprocessor = self.clip_preprocessor
+#         config.args = args
+#         config.use_height = args.use_height
+#         config.npoints = args.npoints
+#         config_others = EasyDict({'subset': self.dataset_split, 'whole': True})
+#         self.dataset = build_dataset_from_cfg(config, config_others)
 
 class Dataset_3D():
     def __init__(self, args, tokenizer, dataset_name, clip_preprocessor=None, level="scene"):

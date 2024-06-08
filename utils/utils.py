@@ -240,3 +240,7 @@ class GaussianBlur(object):
 def get_dataset(clip_preprocessor, tokenizer, args, dataset_name=None, level="scene"):
     dataset_3d = Dataset_3D(args, tokenizer, dataset_name, clip_preprocessor, level)
     return dataset_3d.dataset
+
+# def get_all_in_one_dataset(clip_preprocessor, tokenizer, args):
+#     dataset_3d = all_in_one_Dataset_3D(args, tokenizer, clip_preprocessor)
+#     return dataset_3d.dataset
