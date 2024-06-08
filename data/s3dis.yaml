@@ -1,0 +1,4 @@
+NAME: s3dis
+DATA_PATH: data/s3dis
+PC_PATH: data/s3dis/pc
+IMAGE_PATH: data/s3dis/images

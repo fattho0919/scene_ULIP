@@ -23,6 +23,7 @@ import json
 from tqdm import tqdm
 import pickle
 from PIL import Image
+from scipy.spatial import cKDTree
 
 def pil_loader(path):
     # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
@@ -37,36 +38,53 @@ def pc_normalize(pc):
     pc = pc / m
     return pc
 
-def farthest_point_sample(point, npoint):
-    """
-    Input:
-        xyz: pointcloud data, [N, D]
-        npoint: number of samples
-    Return:
-        centroids: sampled pointcloud index, [npoint, D]
-    """
-    N, D = point.shape
-    xyz = point[:,:3]
-    centroids = np.zeros((npoint,))
-    distance = np.ones((N,)) * 1e10
-    farthest = np.random.randint(0, N)
-    for i in range(npoint):
-        centroids[i] = farthest
-        centroid = xyz[farthest, :]
-        dist = np.sum((xyz - centroid) ** 2, -1)
-        mask = dist < distance
-        distance[mask] = dist[mask]
-        farthest = np.argmax(distance, -1)
-    point = point[centroids.astype(np.int32)]
-    return point
+# def farthest_point_sample(point, npoint):
+#     """
+#     Input:
+#         xyz: pointcloud data, [N, D]
+#         npoint: number of samples
+#     Return:
+#         centroids: sampled pointcloud index, [npoint, D]
+#     """
+#     N, D = point.shape
+#     xyz = point[:,:3]
+#     centroids = np.zeros((npoint,))
+#     distance = np.ones((N,)) * 1e10
+#     farthest = np.random.randint(0, N)
+#     for i in range(npoint):
+#         centroids[i] = farthest
+#         centroid = xyz[farthest, :]
+#         dist = np.sum((xyz - centroid) ** 2, -1)
+#         mask = dist < distance
+#         distance[mask] = dist[mask]
+#         farthest = np.argmax(distance, -1)
+#     point = point[centroids.astype(np.int32)]
+#     return point
+
+def farthest_point_sampling(point_cloud, num_centers):
+    farthest_pts = [np.random.randint(len(point_cloud))]
+    distances = np.linalg.norm(point_cloud[:, :3] - point_cloud[farthest_pts[-1], :3], axis=1)
+    for _ in range(num_centers - 1):
+        next_pt = np.argmax(distances)
+        farthest_pts.append(next_pt)
+        distances = np.minimum(distances, np.linalg.norm(point_cloud[:, :3] - point_cloud[next_pt, :3], axis=1))
+    return point_cloud[farthest_pts], farthest_pts
+
+def k_nearest_neighbors(points, centers, k):
+    tree = cKDTree(points[:, :3])
+    neighbors = []
+    for center in centers:
+        _, idx = tree.query(center[:3], k=k)
+        neighbors.append(points[idx] - center)
+    return np.concatenate(neighbors, axis=0)
 
 def rotate_point_cloud(batch_data):
-    """ Randomly rotate the point clouds to augument the dataset
-        rotation is per shape based along up direction
+    """ Randomly rotate the point clouds with color information to augment the dataset.
+        Rotation is per shape based along the up direction, without altering the color.
         Input:
-          BxNx3 array, original batch of point clouds
+          BxNx6 array, original batch of point clouds (x, y, z, r, g, b)
         Return:
-          BxNx3 array, rotated batch of point clouds
+          BxNx6 array, rotated batch of point clouds with unchanged color
     """
     rotated_data = np.zeros(batch_data.shape, dtype=np.float32)
     for k in range(batch_data.shape[0]):
@@ -76,80 +94,90 @@ def rotate_point_cloud(batch_data):
         rotation_matrix = np.array([[cosval, 0, sinval],
                                     [0, 1, 0],
                                     [-sinval, 0, cosval]])
-        shape_pc = batch_data[k, ...]
-        rotated_data[k, ...] = np.dot(shape_pc.reshape((-1, 3)), rotation_matrix)
+        # Select only x, y, z for rotation
+        shape_pc = batch_data[k, :, :3]
+        rotated_pc = np.dot(shape_pc, rotation_matrix)
+        # Combine the rotated coordinates with the original colors
+        rotated_data[k, :, :3] = rotated_pc
+        rotated_data[k, :, 3:] = batch_data[k, :, 3:]  # Keep RGB colors unchanged
     return rotated_data
 
 def random_point_dropout(batch_pc, max_dropout_ratio=0.875):
-    ''' batch_pc: BxNx3 '''
+    ''' Applies random dropout to point clouds including color data.
+        batch_pc: BxNx6, where N is the number of points per batch, and 6 represents x, y, z, r, g, b
+    '''
     for b in range(batch_pc.shape[0]):
-        dropout_ratio =  np.random.random()*max_dropout_ratio # 0~0.875
-        drop_idx = np.where(np.random.random((batch_pc.shape[1]))<=dropout_ratio)[0]
-        if len(drop_idx)>0:
-            batch_pc[b,drop_idx,:] = batch_pc[b,0,:] # set to the first point
+        dropout_ratio = np.random.random() * max_dropout_ratio  # Random dropout ratio between 0 and max_dropout_ratio
+        drop_idx = np.where(np.random.random((batch_pc.shape[1])) <= dropout_ratio)[0]
+        if len(drop_idx) > 0:
+            batch_pc[b, drop_idx, :] = batch_pc[b, 0, :]  # Set dropped points to the attributes of the first point
     return batch_pc
 
 def random_scale_point_cloud(batch_data, scale_low=0.8, scale_high=1.25):
-    """ Randomly scale the point cloud. Scale is per point cloud.
+    """ Randomly scale the point cloud in the xyz dimensions only. The rgb data remains unchanged.
         Input:
-            BxNx3 array, original batch of point clouds
+            BxNx6 array, original batch of point clouds with xyz and rgb data
         Return:
-            BxNx3 array, scaled batch of point clouds
+            BxNx6 array, scaled batch of point clouds with unchanged rgb data
     """
-    B, N, C = batch_data.shape
+    B, N, _ = batch_data.shape
     scales = np.random.uniform(scale_low, scale_high, B)
     for batch_index in range(B):
-        batch_data[batch_index,:,:] *= scales[batch_index]
+        batch_data[batch_index, :, :3] *= scales[batch_index]  # Scale only x, y, z
+        # Color data at indices 3, 4, 5 remains unchanged
     return batch_data
 
 def shift_point_cloud(batch_data, shift_range=0.1):
-    """ Randomly shift point cloud. Shift is per point cloud.
+    """ Randomly shift point cloud. Shift is per point cloud in xyz dimensions only.
         Input:
-          BxNx3 array, original batch of point clouds
+          BxNx6 array, original batch of point clouds with xyz and rgb data
         Return:
-          BxNx3 array, shifted batch of point clouds
+          BxNx6 array, shifted batch of point clouds with unchanged rgb data
     """
-    B, N, C = batch_data.shape
-    shifts = np.random.uniform(-shift_range, shift_range, (B,3))
+    B, N, _ = batch_data.shape
+    shifts = np.random.uniform(-shift_range, shift_range, (B, 3))
     for batch_index in range(B):
-        batch_data[batch_index,:,:] += shifts[batch_index,:]
+        batch_data[batch_index, :, :3] += shifts[batch_index, :]  # Only shift x, y, z
     return batch_data
 
 def jitter_point_cloud(batch_data, sigma=0.01, clip=0.05):
-    """ Randomly jitter points. jittering is per point.
+    """ Randomly jitter points in the xyz dimensions only. The rgb data remains unchanged.
         Input:
-          BxNx3 array, original batch of point clouds
+          BxNx6 array, original batch of point clouds with xyz and rgb data
         Return:
-          BxNx3 array, jittered batch of point clouds
+          BxNx6 array, jittered batch of point clouds with unchanged rgb data
     """
-    B, N, C = batch_data.shape
+    B, N, _ = batch_data.shape
     assert(clip > 0)
-    jittered_data = np.clip(sigma * np.random.randn(B, N, C), -1*clip, clip)
-    jittered_data += batch_data
+    jittered_data = np.zeros_like(batch_data)
+    jittered_data[:, :, :3] = np.clip(sigma * np.random.randn(B, N, 3), -1*clip, clip)  # Jitter only x, y, z
+    jittered_data[:, :, :3] += batch_data[:, :, :3]
+    jittered_data[:, :, 3:] = batch_data[:, :, 3:]  # Keep rgb data unchanged
     return jittered_data
 
 def rotate_perturbation_point_cloud(batch_data, angle_sigma=0.06, angle_clip=0.18):
-    """ Randomly perturb the point clouds by small rotations
+    """ Randomly perturb the point clouds by small rotations in xyz dimensions only.
         Input:
-          BxNx3 array, original batch of point clouds
+          BxNx6 array, original batch of point clouds with xyz and rgb data
         Return:
-          BxNx3 array, rotated batch of point clouds
+          BxNx6 array, rotated batch of point clouds with unchanged rgb data
     """
-    rotated_data = np.zeros(batch_data.shape, dtype=np.float32)
+    rotated_data = np.zeros_like(batch_data)
     for k in range(batch_data.shape[0]):
-        angles = np.clip(angle_sigma*np.random.randn(3), -angle_clip, angle_clip)
-        Rx = np.array([[1,0,0],
-                       [0,np.cos(angles[0]),-np.sin(angles[0])],
-                       [0,np.sin(angles[0]),np.cos(angles[0])]])
-        Ry = np.array([[np.cos(angles[1]),0,np.sin(angles[1])],
-                       [0,1,0],
-                       [-np.sin(angles[1]),0,np.cos(angles[1])]])
-        Rz = np.array([[np.cos(angles[2]),-np.sin(angles[2]),0],
-                       [np.sin(angles[2]),np.cos(angles[2]),0],
-                       [0,0,1]])
-        R = np.dot(Rz, np.dot(Ry,Rx))
-        shape_pc = batch_data[k, ...]
-        rotated_data[k, ...] = np.dot(shape_pc.reshape((-1, 3)), R)
+        angles = np.clip(angle_sigma * np.random.randn(3), -angle_clip, angle_clip)
+        Rx = np.array([[1, 0, 0],
+                       [0, np.cos(angles[0]), -np.sin(angles[0])],
+                       [0, np.sin(angles[0]), np.cos(angles[0])]])
+        Ry = np.array([[np.cos(angles[1]), 0, np.sin(angles[1])],
+                       [0, 1, 0],
+                       [-np.sin(angles[1]), 0, np.cos(angles[1])]])
+        Rz = np.array([[np.cos(angles[2]), -np.sin(angles[2]), 0],
+                       [np.sin(angles[2]), np.cos(angles[2]), 0],
+                       [0, 0, 1]])
+        R = np.dot(Rz, np.dot(Ry, Rx))
+        shape_pc = batch_data[k, :, :3]
+        rotated_data[k, :, :3] = np.dot(shape_pc.reshape((-1, 3)), R)
+        rotated_data[k, :, 3:] = batch_data[k, :, 3:]  # Keep rgb data unchanged
     return rotated_data
 
 import os, sys, h5py
@@ -158,198 +186,45 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
 
 @DATASETS.register_module()
-class ModelNet(data.Dataset):
+class s3dis(data.Dataset):
     def __init__(self, config):
-        self.root = config.DATA_PATH
-        self.npoints = config.npoints
-        self.use_normals = config.USE_NORMALS
-        self.num_category = config.NUM_CATEGORY
-        self.process_data = True
-        self.uniform = True
-        self.generate_from_raw_data = False
-        split = config.subset
-        self.subset = config.subset
-
-        if self.num_category == 10:
-            self.catfile = os.path.join(self.root, 'modelnet10_shape_names.txt')
-        else:
-            self.catfile = os.path.join(self.root, 'modelnet40_shape_names.txt')
-
-        self.cat = [line.rstrip() for line in open(self.catfile)]
-        self.classes = dict(zip(self.cat, range(len(self.cat))))
-
-        shape_ids = {}
-        if self.num_category == 10:
-            shape_ids['train'] = [line.rstrip() for line in open(os.path.join(self.root, 'modelnet10_train.txt'))]
-            shape_ids['test'] = [line.rstrip() for line in open(os.path.join(self.root, 'modelnet10_test.txt'))]
-        else:
-            shape_ids['train'] = [line.rstrip() for line in open(os.path.join(self.root, 'modelnet40_train.txt'))]
-            shape_ids['test'] = [line.rstrip() for line in open(os.path.join(self.root, 'modelnet40_test.txt'))]
-
-        assert (split == 'train' or split == 'test')
-        shape_names = ['_'.join(x.split('_')[0:-1]) for x in shape_ids[split]]
-        self.datapath = [(shape_names[i], os.path.join(self.root, shape_names[i], shape_ids[split][i]) + '.txt') for i
-                         in range(len(shape_ids[split]))]
-        print_log('The size of %s data is %d' % (split, len(self.datapath)), logger='ModelNet')
-
-        if self.uniform:
-            self.save_path = os.path.join(self.root,
-                                          'modelnet%d_%s_%dpts_fps.dat' % (self.num_category, split, self.npoints))
-        else:
-            self.save_path = os.path.join(self.root,
-                                          'modelnet%d_%s_%dpts.dat' % (self.num_category, split, self.npoints))
-
-        if self.process_data:
-            if not os.path.exists(self.save_path):
-                # make sure you have raw data in the path before you enable generate_from_raw_data=True.
-                if self.generate_from_raw_data:
-                    print_log('Processing data %s (only running in the first time)...' % self.save_path, logger='ModelNet')
-                    self.list_of_points = [None] * len(self.datapath)
-                    self.list_of_labels = [None] * len(self.datapath)
-
-                    for index in tqdm(range(len(self.datapath)), total=len(self.datapath)):
-                        fn = self.datapath[index]
-                        cls = self.classes[self.datapath[index][0]]
-                        cls = np.array([cls]).astype(np.int32)
-                        point_set = np.loadtxt(fn[1], delimiter=',').astype(np.float32)
-
-                        if self.uniform:
-                            point_set = farthest_point_sample(point_set, self.npoints)
-                            print_log("uniformly sampled out {} points".format(self.npoints))
-                        else:
-                            point_set = point_set[0:self.npoints, :]
-
-                        self.list_of_points[index] = point_set
-                        self.list_of_labels[index] = cls
-
-                    with open(self.save_path, 'wb') as f:
-                        pickle.dump([self.list_of_points, self.list_of_labels], f)
-                else:
-                    # no pre-processed dataset found and no raw data found, then load 8192 points dataset then do fps after.
-                    self.save_path = os.path.join(self.root,
-                                                  'modelnet%d_%s_%dpts_fps.dat' % (
-                                                  self.num_category, split, 8192))
-                    print_log('Load processed data from %s...' % self.save_path, logger='ModelNet')
-                    print_log('since no exact points pre-processed dataset found and no raw data found, load 8192 pointd dataset first, then do fps to {} after, the speed is excepted to be slower due to fps...'.format(self.npoints), logger='ModelNet')
-                    with open(self.save_path, 'rb') as f:
-                        self.list_of_points, self.list_of_labels = pickle.load(f)
-
-            else:
-                print_log('Load processed data from %s...' % self.save_path, logger='ModelNet')
-                with open(self.save_path, 'rb') as f:
-                    self.list_of_points, self.list_of_labels = pickle.load(f)
-
-        self.shape_names_addr = os.path.join(self.root, 'modelnet40_shape_names.txt')
-        with open(self.shape_names_addr) as file:
-            lines = file.readlines()
-            lines = [line.rstrip() for line in lines]
-        self.shape_names = lines
-
-        # TODO: disable for backbones except for PointNEXT!!!
-        self.use_height = config.use_height
-
-    def __len__(self):
-        return len(self.list_of_labels)
-
-    def _get_item(self, index):
-        if self.process_data:
-            point_set, label = self.list_of_points[index], self.list_of_labels[index]
-        else:
-            fn = self.datapath[index]
-            cls = self.classes[self.datapath[index][0]]
-            label = np.array([cls]).astype(np.int32)
-            point_set = np.loadtxt(fn[1], delimiter=',').astype(np.float32)
-
-            if self.uniform:
-                point_set = farthest_point_sample(point_set, self.npoints)
-            else:
-                point_set = point_set[0:self.npoints, :]
-
-        if  self.npoints < point_set.shape[0]:
-            point_set = farthest_point_sample(point_set, self.npoints)
-
-        point_set[:, 0:3] = pc_normalize(point_set[:, 0:3])
-        if not self.use_normals:
-            point_set = point_set[:, 0:3]
-
-        if self.use_height:
-            self.gravity_dim = 1
-            height_array = point_set[:, self.gravity_dim:self.gravity_dim + 1] - point_set[:,
-                                                                            self.gravity_dim:self.gravity_dim + 1].min()
-            point_set = np.concatenate((point_set, height_array), axis=1)
-
-        return point_set, label[0]
-
-    def __getitem__(self, index):
-        points, label = self._get_item(index)
-        pt_idxs = np.arange(0, points.shape[0])  # 2048
-        if self.subset == 'train':
-            np.random.shuffle(pt_idxs)
-        current_points = points[pt_idxs].copy()
-        current_points = torch.from_numpy(current_points).float()
-        label_name = self.shape_names[int(label)]
-
-        return current_points, label, label_name
-
-@DATASETS.register_module()
-class ShapeNet(data.Dataset):
-    def __init__(self, config):
-
+        self.level = config.get('level')
         self.data_root = config.DATA_PATH
+        self.mapping_path = os.path.join(self.data_root, f"s3dis_{self.level}_vit-gpt2_matching_idx")
         self.pc_path = config.PC_PATH
-        self.subset = config.subset
-        self.npoints = config.npoints
+        self.image_path = config.IMAGE_PATH
         self.tokenizer = config.tokenizer
-        self.train_transform = config.train_transform
-        self.id_map_addr = os.path.join(config.DATA_PATH, 'taxonomy.json')
+        self.clip_preprocessor = config.clip_preprocessor
         self.rendered_image_addr = config.IMAGE_PATH
-        self.picked_image_type = ['', '_depth0001']
-        self.picked_rotation_degrees = list(range(0, 360, 12))
-        self.picked_rotation_degrees = [(3 - len(str(degree))) * '0' + str(degree) if len(str(degree)) < 3 else str(degree) for degree in self.picked_rotation_degrees]
+        self.data_list_file = os.path.join(self.data_root, f's3dis_{self.level}_list.json')
+        print_log(f'[DATASET] Loading s3dis_{self.level} dataset', logger='S3DIS')
 
-        with open(self.id_map_addr, 'r') as f:
-            self.id_map = json.load(f)
-
-        self.prompt_template_addr = os.path.join('./data/templates.json')
-        with open(self.prompt_template_addr) as f:
-            self.templates = json.load(f)[config.pretrain_dataset_prompt]
-
-        self.synset_id_map = {}
-        for id_dict in self.id_map:
-            synset_id = id_dict["synsetId"]
-            self.synset_id_map[synset_id] = id_dict
-
-        self.data_list_file = os.path.join(self.data_root, f'{self.subset}.txt')
-        test_data_list_file = os.path.join(self.data_root, 'test.txt')
-
-        self.sample_points_num = self.npoints
-        self.whole = config.get('whole')
-
-        print_log(f'[DATASET] sample out {self.sample_points_num} points', logger='ShapeNet-55')
-        print_log(f'[DATASET] Open file {self.data_list_file}', logger='ShapeNet-55')
+        print_log(f'[DATASET] Open file {self.data_list_file}', logger='S3DIS')
         with open(self.data_list_file, 'r') as f:
-            lines = f.readlines()
-        if self.whole:
-            with open(test_data_list_file, 'r') as f:
-                test_lines = f.readlines()
-            print_log(f'[DATASET] Open file {test_data_list_file}', logger='ShapeNet-55')
-            lines = test_lines + lines
-        self.file_list = []
-        for line in lines:
-            line = line.strip()
-            taxonomy_id = line.split('-')[0]
-            model_id = line[len(taxonomy_id) + 1:].split('.')[0]
-            self.file_list.append({
-                'taxonomy_id': taxonomy_id,
-                'model_id': model_id,
-                'file_path': line
-            })
-        print_log(f'[DATASET] {len(self.file_list)} instances were loaded', logger='ShapeNet-55')
+            self.annos = json.load(f)
+            print_log(f'[DATASET] {len(self.annos)} instances were loaded', logger='S3DIS')
 
-        self.permutation = np.arange(self.npoints)
+        # *---- if the mapping dict exists, load it; otherwise, construct it ----*
+        if self.level != 'scene':
+            if os.path.exists(os.path.join(self.data_root, f'{self.level}_mapping_dict.pkl')):
+                print_log(f'[DATASET] Loading {self.level} mapping dict', logger='S3DIS')
+                with open(f'{self.data_root}/{self.level}_mapping_dict.pkl', 'rb') as pickle_file:
+                    self.mapping_dict = pickle.load(pickle_file)
+            else:
+                print_log(f'[DATASET] Constructing {self.level} mapping dict', logger='S3DIS')
+                self.mapping_dict = {}
+                for anno in self.annos:
+                    if anno['scene_id'] not in self.mapping_dict:
+                        mapping_file = os.path.join(self.mapping_path, f"{anno['scene_id']}.pickle")
+                        with open(mapping_file, 'rb') as f:
+                            mapping_idx = pickle.load(f)
+                        for k,v in mapping_idx.items():
+                            self.mapping_dict[k] = v
+                with open(f'{self.data_root}/{self.level}_mapping_dict.pkl', 'wb') as pickle_file:
+                    pickle.dump(self.mapping_dict, pickle_file)
 
         self.uniform = True
-        self.augment = True
+        self.augment = False
         self.use_caption_templates = False
         # =================================================
         # TODO: disable for backbones except for PointNEXT!!!
@@ -357,7 +232,7 @@ class ShapeNet(data.Dataset):
         # =================================================
 
         if self.augment:
-            print("using augmented point clouds.")
+            print_log(f'[DATASET] Using augmented point clouds', logger='S3DIS')
 
     def pc_norm(self, pc):
         """ pc: NxC, return NxC """
@@ -373,65 +248,195 @@ class ShapeNet(data.Dataset):
         return pc
 
     def __getitem__(self, idx):
-        sample = self.file_list[idx]
+        sample = self.annos[idx]
 
-        data = IO.get(os.path.join(self.pc_path, sample['file_path'])).astype(np.float32)
-
-        if self.uniform and self.sample_points_num < data.shape[0]:
-            data = farthest_point_sample(data, self.sample_points_num)
-        else:
-            data = self.random_sample(data, self.sample_points_num)
-        data = self.pc_norm(data)
+        pc = IO.get(os.path.join(self.pc_path, f"{sample['scene_id']}.npy")).astype(np.float16)
+        if self.level != 'scene':
+            try:
+                pc = pc[self.mapping_dict[sample['id']]]
+            except Exception as e:
+                print(e)
+                pc = pc[:len(self.mapping_dict[sample['id']])]
 
         if self.augment:
-            data = random_point_dropout(data[None, ...])
-            data = random_scale_point_cloud(data)
-            data = shift_point_cloud(data)
-            data = rotate_perturbation_point_cloud(data)
-            data = rotate_point_cloud(data)
-            data = data.squeeze()
+            pc = random_point_dropout(pc[None, ...])
+            pc = random_scale_point_cloud(pc)
+            pc = shift_point_cloud(pc)
+            pc = rotate_perturbation_point_cloud(pc)
+            pc = rotate_point_cloud(pc)
+            pc = pc.squeeze()
 
+        # 這邊gravity_dim是1代表它假設y軸是重力方向，所以會把y軸的值減掉最小值，這樣就會讓y軸的值變成正值，也就是高度
+        # s3dis和scannet都是z軸是重力方向，所以這邊要改成2
         if self.use_height:
-            self.gravity_dim = 1
-            height_array = data[:, self.gravity_dim:self.gravity_dim + 1] - data[:,
+            print_log(f'[DATASET] Using height', logger='S3DIS')
+            self.gravity_dim = 2
+            height_array = pc[:, self.gravity_dim:self.gravity_dim + 1] - pc[:,
                                                                        self.gravity_dim:self.gravity_dim + 1].min()
-            data = np.concatenate((data, height_array), axis=1)
-            data = torch.from_numpy(data).float()
+            pc = np.concatenate((pc, height_array), axis=1)
+            pc = torch.from_numpy(pc).to(torch.bfloat16)
         else:
-            data = torch.from_numpy(data).float()
+            pc = torch.from_numpy(pc).to(torch.bfloat16)
 
-        captions = self.synset_id_map[sample['taxonomy_id']]['name']
-        captions = [caption.strip() for caption in captions.split(',') if caption.strip()]
-        caption = random.choice(captions)
-        captions = []
+        captions = sample['conversations'][1]['value']
+        # captions = [caption.strip() for caption in captions.split(',') if caption.strip()]
+        # caption = random.choice(captions)
+        # captions = []
         tokenized_captions = []
         if self.use_caption_templates:
+            print("use caption templates")
             for template in self.templates:
                 caption = template.format(caption)
                 captions.append(caption)
                 tokenized_captions.append(self.tokenizer(caption))
         else:
-            tokenized_captions.append(self.tokenizer(caption))
+            # tokenized_captions.append(self.tokenizer(caption))
+            tokenized_captions = self.tokenizer(captions)
 
-        tokenized_captions = torch.stack(tokenized_captions)
+        # tokenized_captions = torch.stack(tokenized_captions)
+        # print(tokenized_captions.size())
 
-        picked_model_rendered_image_addr = self.rendered_image_addr + '/' +\
-                                           sample['taxonomy_id'] + '-' + sample['model_id'] + '/'
-        picked_image_name = sample['taxonomy_id'] + '-' + sample['model_id'] + '_r_' +\
-                            str(random.choice(self.picked_rotation_degrees)) +\
-                            random.choice(self.picked_image_type) + '.png'
-        picked_image_addr = picked_model_rendered_image_addr + picked_image_name
+        if self.level == 'view':
+            image_dir = os.path.join(self.image_path, f"{sample['id']}.png")
+            try:
+                image = pil_loader(image_dir)
+                image = self.clip_preprocessor(image)
+            except:
+                raise ValueError("image is corrupted: {}".format(image_dir))
 
-        try:
-            image = pil_loader(picked_image_addr)
-            image = self.train_transform(image)
-        except:
-            raise ValueError("image is corrupted: {}".format(picked_image_addr))
-
-        return sample['taxonomy_id'], sample['model_id'], tokenized_captions, data, image
+            return tokenized_captions, pc, image
+        else:
+            return tokenized_captions, pc
 
     def __len__(self):
-        return len(self.file_list)
+        return len(self.annos)
+    
+@DATASETS.register_module()
+class scannet(data.Dataset):
+    def __init__(self, config):
+        self.level = config.get('level')
+        self.data_root = config.DATA_PATH
+        self.mapping_path = os.path.join(self.data_root, f"scannetv2_{self.level}_vit-gpt2_matching_idx.pickle")
+        self.pc_path = config.PC_PATH
+        self.image_path = config.IMAGE_PATH
+        self.tokenizer = config.tokenizer
+        self.clip_preprocessor = config.clip_preprocessor
+        self.rendered_image_addr = config.IMAGE_PATH
+        self.data_list_file = os.path.join(self.data_root, f'scannet_{self.level}_list.json')
+        print_log(f'[DATASET] Loading scannet_{self.level} dataset', logger='SCANNET')
+
+        print_log(f'[DATASET] Open file {self.data_list_file}', logger='SCANNET')
+        with open(self.data_list_file, 'r') as f:
+            self.annos = json.load(f)
+            print_log(f'[DATASET] {len(self.annos)} instances were loaded', logger='SCANNET')
+
+        # *---- if the mapping dict exists, load it; otherwise, construct it ----*
+        if self.level != 'scene':
+            print_log(f'[DATASET] Loading {self.level} mapping dict', logger='SCANNET')
+            with open(self.mapping_path, 'rb') as pickle_file:
+                self.mapping_dict = pickle.load(pickle_file)
+
+        self.uniform = True
+        self.augment = False
+        self.use_caption_templates = False
+        # =================================================
+        # TODO: disable for backbones except for PointNEXT!!!
+        self.use_height = config.use_height
+        # =================================================
+
+        if self.augment:
+            print_log(f'[DATASET] Using augmented point clouds', logger='SCANNET')
+
+    def pc_norm(self, pc):
+        """ pc: NxC, return NxC """
+        centroid = np.mean(pc, axis=0)
+        pc = pc - centroid
+        m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
+        pc = pc / m
+        return pc
+
+    def random_sample(self, pc, num):
+        np.random.shuffle(self.permutation)
+        pc = pc[self.permutation[:num]]
+        return pc
+
+    def __getitem__(self, idx):
+        i = 0
+        sample = self.annos[idx]
+        captions = sample['conversations'][1]['value']
+
+        if self.level == 'entity':
+            while (captions == '') or (sample['scene_id'] not in self.mapping_dict) or (sample['id'] not in self.mapping_dict[sample['scene_id']]):
+                # print_log(f'Skip {sample["scene_id"]} {sample["id"]}', logger='DATASET')
+                sample = self.annos[idx+i]
+                captions = sample['conversations'][1]['value']
+                i += 1
+        elif self.level == 'view':
+            while (captions == '') or (sample['scene_id'] not in self.mapping_dict) or (sample['id'] not in self.mapping_dict[sample['scene_id']]) or (os.path.exists(os.path.join(self.image_path, f"{sample['scene_id']}",f"{sample['id']}.jpg")) == False):
+                # print_log(f'Skip {sample["scene_id"]} {sample["id"]}', logger='DATASET')
+                sample = self.annos[idx+i]
+                captions = sample['conversations'][1]['value']
+                i += 1
+        # captions = [caption.strip() for caption in captions.split(',') if caption.strip()]
+        # caption = random.choice(captions)
+        # captions = []
+        tokenized_captions = []
+        if self.use_caption_templates:
+            print("use caption templates")
+            for template in self.templates:
+                caption = template.format(caption)
+                captions.append(caption)
+                tokenized_captions.append(self.tokenizer(caption))
+        else:
+            # tokenized_captions.append(self.tokenizer(caption))
+            tokenized_captions = self.tokenizer(captions)
+
+        pc = IO.get(os.path.join(self.pc_path, f"{sample['scene_id']}.npy")).astype(np.float16)
+        if self.level != 'scene':
+            try:
+                pc = pc[self.mapping_dict[sample['scene_id']][sample['id']]]
+            except Exception as e:
+                print(e)
+                pc = pc[:len(self.mapping_dict[sample['scene_id']][sample['id']])]
+                
+
+        if self.augment:
+            pc = random_point_dropout(pc[None, ...])
+            pc = random_scale_point_cloud(pc)
+            pc = shift_point_cloud(pc)
+            pc = rotate_perturbation_point_cloud(pc)
+            pc = rotate_point_cloud(pc)
+            pc = pc.squeeze()
+
+        # 這邊gravity_dim是1代表它假設y軸是重力方向，所以會把y軸的值減掉最小值，這樣就會讓y軸的值變成正值，也就是高度
+        # s3dis和scannet都是z軸是重力方向，所以這邊要改成2
+        if self.use_height:
+            print_log(f'[DATASET] Using height', logger='SCANNET')
+            self.gravity_dim = 2
+            height_array = pc[:, self.gravity_dim:self.gravity_dim + 1] - pc[:,
+                                                                       self.gravity_dim:self.gravity_dim + 1].min()
+            pc = np.concatenate((pc, height_array), axis=1)
+            pc = torch.from_numpy(pc).to(torch.bfloat16)
+        else:
+            pc = torch.from_numpy(pc).to(torch.bfloat16)
+
+        # tokenized_captions = torch.stack(tokenized_captions)
+        # print(tokenized_captions.size())
+
+        if self.level == 'view':
+            image_dir = os.path.join(self.image_path, f"{sample['scene_id']}",f"{sample['id']}.jpg")
+            try:
+                image = pil_loader(image_dir)
+                image = self.clip_preprocessor(image)
+            except:
+                raise ValueError("image is corrupted: {}".format(image_dir))
+
+            return tokenized_captions, pc, image
+        else:
+            return tokenized_captions, pc
+
+    def __len__(self):
+        return len(self.annos)
 
 import collections.abc as container_abcs
 int_classes = int
@@ -443,54 +448,44 @@ default_collate_err_msg_format = (
     "dicts or lists; found {}")
 np_str_obj_array_pattern = re.compile(r'[SaUO]')
 
+def view_customized_collate_fn(batch):
+    tokenized_captions, pcs, images = zip(*batch)
+    
+    tokenized_captions = torch.cat(tokenized_captions, dim=0)
+    images = torch.stack(images)
+
+    min_num_points = min(pc.shape[0] for pc in pcs)
+    num_centers = 256  # Number of center points to sample
+    k = min_num_points // num_centers  # Number of neighbors per center point
+
+    processed_pcs = []
+    for pc in pcs:
+        centers, _ = farthest_point_sampling(pc, num_centers)
+        processed_pc = k_nearest_neighbors(pc, centers, k)
+        processed_pcs.append(torch.from_numpy(processed_pc).float())
+
+    pcs = torch.stack(processed_pcs)
+
+    return tokenized_captions, pcs, images
+
 def customized_collate_fn(batch):
-    r"""Puts each data field into a tensor with outer dimension batch size"""
+    tokenized_captions, pcs = zip(*batch)
+    
+    tokenized_captions = torch.cat(tokenized_captions, dim=0)
 
-    elem = batch[0]
-    elem_type = type(elem)
+    min_num_points = min(pc.shape[0] for pc in pcs)
+    num_centers = 32  # Number of center points to sample
+    k = min_num_points // num_centers  # Number of neighbors per center point
 
-    if isinstance(batch, list):
-        batch = [example for example in batch if example[4] is not None]
+    processed_pcs = []
+    for pc in pcs:
+        centers, _ = farthest_point_sampling(pc, num_centers)
+        processed_pc = k_nearest_neighbors(pc, centers, k)
+        processed_pcs.append(torch.from_numpy(processed_pc).float())
 
-    if isinstance(elem, torch.Tensor):
-        out = None
-        if torch.utils.data.get_worker_info() is not None:
-            # If we're in a background process, concatenate directly into a
-            # shared memory tensor to avoid an extra copy
-            numel = sum([x.numel() for x in batch])
-            storage = elem.storage()._new_shared(numel)
-            out = elem.new(storage)
-        return torch.stack(batch, 0, out=out)
-    elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
-            and elem_type.__name__ != 'string_':
-        if elem_type.__name__ == 'ndarray' or elem_type.__name__ == 'memmap':
-            # array of string classes and object
-            if np_str_obj_array_pattern.search(elem.dtype.str) is not None:
-                raise TypeError(default_collate_err_msg_format.format(elem.dtype))
+    pcs = torch.stack(processed_pcs)
 
-            return customized_collate_fn([torch.as_tensor(b) for b in batch])
-        elif elem.shape == ():  # scalars
-            return torch.as_tensor(batch)
-    elif isinstance(elem, float):
-        return torch.tensor(batch, dtype=torch.float64)
-    elif isinstance(elem, int_classes):
-        return torch.tensor(batch)
-    elif isinstance(elem, string_classes):
-        return batch
-    elif isinstance(elem, container_abcs.Mapping):
-        return {key: customized_collate_fn([d[key] for d in batch]) for key in elem}
-    elif isinstance(elem, tuple) and hasattr(elem, '_fields'):  # namedtuple
-        return elem_type(*(customized_collate_fn(samples) for samples in zip(*batch)))
-    elif isinstance(elem, container_abcs.Sequence):
-        # check to make sure that the elements in batch have consistent size
-        it = iter(batch)
-        elem_size = len(next(it))
-        if not all(len(elem) == elem_size for elem in it):
-            raise RuntimeError('each element in list of batch should be of equal size')
-        transposed = zip(*batch)
-        return [customized_collate_fn(samples) for samples in transposed]
-
-    raise TypeError(default_collate_err_msg_format.format(elem_type))
+    return tokenized_captions, pcs
 
 
 def merge_new_config(config, new_config):
@@ -520,32 +515,33 @@ def cfg_from_yaml_file(cfg_file):
     return config
 
 class Dataset_3D():
-    def __init__(self, args, tokenizer, dataset_type, train_transform=None):
-        if dataset_type == 'train':
-            self.dataset_name = args.pretrain_dataset_name
-        elif dataset_type == 'val':
-            self.dataset_name = args.validate_dataset_name
-        else:
-            raise ValueError("not supported dataset type.")
+    def __init__(self, args, tokenizer, dataset_name, clip_preprocessor=None, level="scene"):
+        self.dataset_name = dataset_name
+        # if dataset_type == 'train':
+        #     self.dataset_name = args.pretrain_dataset_name
+        # elif dataset_type == 'val':
+        #     self.dataset_name = args.validate_dataset_name
+        # else:
+        #     raise ValueError("not supported dataset type.")
         with open('./data/dataset_catalog.json', 'r') as f:
             self.dataset_catalog = json.load(f)
-            self.dataset_usage = self.dataset_catalog[self.dataset_name]['usage']
-            self.dataset_split = self.dataset_catalog[self.dataset_name][self.dataset_usage]
+            self.dataset_usage = self.dataset_catalog[self.dataset_name]['usage'] # train or val
+            self.dataset_split = self.dataset_catalog[self.dataset_name][self.dataset_usage] # dataset_catalog[dataset_name]["train" / "val"]
             self.dataset_config_dir = self.dataset_catalog[self.dataset_name]['config']
         self.tokenizer = tokenizer
-        self.train_transform = train_transform
-        self.pretrain_dataset_prompt = args.pretrain_dataset_prompt
-        self.validate_dataset_prompt = args.validate_dataset_prompt
-        self.build_3d_dataset(args, self.dataset_config_dir)
+        self.clip_preprocessor = clip_preprocessor
+        self.pretrain_dataset_prompt = self.dataset_name
+        # self.validate_dataset_prompt = args.validate_dataset_prompt
+        self.build_3d_dataset(args, self.dataset_config_dir, level)
 
-    def build_3d_dataset(self, args, config):
+    def build_3d_dataset(self, args, config, level):
         config = cfg_from_yaml_file(config)
         config.tokenizer = self.tokenizer
-        config.train_transform = self.train_transform
-        config.pretrain_dataset_prompt = self.pretrain_dataset_prompt
-        config.validate_dataset_prompt = self.validate_dataset_prompt
+        config.clip_preprocessor = self.clip_preprocessor
+        config.pretrain_dataset_prompt = self.dataset_name
+        # config.validate_dataset_prompt = self.validate_dataset_prompt
         config.args = args
         config.use_height = args.use_height
         config.npoints = args.npoints
-        config_others = EasyDict({'subset': self.dataset_split, 'whole': True})
+        config_others = EasyDict({'subset': self.dataset_split, 'whole': True, 'level': level})
         self.dataset = build_dataset_from_cfg(config, config_others)

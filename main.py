@@ -12,6 +12,7 @@ from collections import OrderedDict
 import math
 import time
 import wandb
+import open_clip
 
 import torch.cuda.amp as amp
 import torch.nn.parallel
@@ -28,28 +29,30 @@ from utils.utils import get_dataset
 import models.ULIP_models as models
 from utils.tokenizer import SimpleTokenizer
 from utils import utils
-from data.dataset_3d import customized_collate_fn
+from data.dataset_3d import customized_collate_fn, view_customized_collate_fn
 
+# torch.autograd.set_detect_anomaly(True)
 
 def get_args_parser():
     parser = argparse.ArgumentParser(description='ULIP training and evaluation', add_help=False)
     # Data
     parser.add_argument('--output-dir', default='./outputs', type=str, help='output dir')
-    parser.add_argument('--pretrain_dataset_name', default='shapenet', type=str)
-    parser.add_argument('--pretrain_dataset_prompt', default='shapenet_64', type=str)
+    parser.add_argument('--pretrain_dataset_name', default='s3dis', type=str)
+    parser.add_argument('--pretrain_dataset_prompt', default='s3dis', type=str)
     parser.add_argument('--validate_dataset_name', default='modelnet40', type=str)
     parser.add_argument('--validate_dataset_prompt', default='modelnet40_64', type=str)
     parser.add_argument('--use_height', action='store_true', help='whether to use height informatio, by default enabled with PointNeXt.')
     parser.add_argument('--npoints', default=8192, type=int, help='number of points used for pre-train and test.')
     # Model
     parser.add_argument('--model', default='ULIP_PN_SSG', type=str)
+    parser.add_argument('--clip_model', default='hf-hub:laion/CLIP-ViT-L-14-DataComp.XL-s13B-b90K', type=str)
     # Training
     parser.add_argument('--epochs', default=250, type=int)
     parser.add_argument('--warmup-epochs', default=1, type=int)
     parser.add_argument('--start-epoch', default=0, type=int)
-    parser.add_argument('--batch-size', default=64, type=int,
+    parser.add_argument('--batch-size', default=1, type=int,
                         help='number of samples per-device/per-gpu')
-    parser.add_argument('--lr', default=3e-3, type=float)
+    parser.add_argument('--lr', default=3e-2, type=float)
     parser.add_argument('--lr-start', default=1e-6, type=float,
                         help='initial warmup lr')
     parser.add_argument('--lr-end', default=1e-5, type=float,
@@ -87,39 +90,46 @@ def get_args_parser():
 best_acc1 = 0
 
 def main(args):
-    utils.init_distributed_mode(args)
+    # utils.init_distributed_mode(args)
+    args.distributed = False
 
     global best_acc1
 
     if utils.is_main_process() and args.wandb:
         wandb_id = os.path.split(args.output_dir)[-1]
-        wandb.init(project='ULIP', id=wandb_id, config=args, reinit=True, entity='lxue')
+        wandb.init(project='ULIP', id=wandb_id, config=args, reinit=True, entity='wangfatho')
 
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    if args.evaluate_3d:
-        zero_stats = test_zeroshot_3d(args)
-        print(zero_stats)
-        return
+    # if args.evaluate_3d:
+    #     zero_stats = test_zeroshot_3d(args)
+    #     print(zero_stats)
+    #     return
 
     # create model
+    print("=> creating CLIP model {}".format(args.clip_model))
+    clip_model, clip_preprocessor, _ = open_clip.create_model_and_transforms('hf-hub:laion/CLIP-ViT-L-14-DataComp.XL-s13B-b90K')
+    tokenizer = open_clip.get_tokenizer('hf-hub:laion/CLIP-ViT-L-14-DataComp.XL-s13B-b90K')
+
     print("=> creating model: {}".format(args.model))
-    model = getattr(models, args.model)(args=args)
+    model = getattr(models, args.model)(args=args, clip_model=clip_model)
     model.cuda(args.gpu)
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], bucket_cap_mb=200, find_unused_parameters=False)
 
+
     # define loss function (criterion) and optimizer
     criterion = models.get_loss(args).cuda(args.gpu)
 
+    # 設定哪一些參數需要 weight decay
     p_wd, p_non_wd = [], []
     for n, p in model.named_parameters():
         if not p.requires_grad:
-            print('in optimizer freeze {}'.format(n))
+            # print('in optimizer freeze {}'.format(n))
             continue  # frozen weights
         if p.ndim < 2 or 'bias' in n or 'ln' in n or 'bn' in n:
             p_non_wd.append(p)
@@ -144,7 +154,7 @@ def main(args):
             print(result)
             optimizer.load_state_dict(checkpoint['optimizer']) if 'optimizer' in checkpoint else ()
             scaler.load_state_dict(checkpoint['scaler']) if 'scaler' in checkpoint else ()
-            best_acc1 = checkpoint['best_acc1']
+            # best_acc1 = checkpoint['best_acc1']
             print("=> loaded resume checkpoint '{}' (epoch {})"
                   .format(args.resume, epoch))
         else:
@@ -159,7 +169,7 @@ def main(args):
             model.load_state_dict(latest_checkpoint['state_dict'])
             optimizer.load_state_dict(latest_checkpoint['optimizer'])
             scaler.load_state_dict(latest_checkpoint['scaler'])
-            best_acc1 = latest_checkpoint['best_acc1']
+            # best_acc1 = latest_checkpoint['best_acc1']
             print("=> loaded latest checkpoint '{}' (epoch {})"
                   .format(latest, latest_checkpoint['epoch']))
 
@@ -167,72 +177,127 @@ def main(args):
 
     # Data loading code
     print("=> creating dataset")
-    tokenizer = SimpleTokenizer()
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-    train_transform = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.5, 1.0)),
-            transforms.ToTensor(),
-            normalize
-        ])
+    # tokenizer = SimpleTokenizer()
+    # normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    #                                  std=[0.229, 0.224, 0.225])
+    # train_transform = transforms.Compose([
+    #         transforms.RandomResizedCrop(224, scale=(0.5, 1.0)),
+    #         transforms.ToTensor(),
+    #         normalize
+    #     ])
 
-    train_dataset = get_dataset(train_transform, tokenizer, args, 'train')
-    val_dataset = get_dataset(None, tokenizer, args, 'val')
+    s3dis_entity_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 's3dis', "entity")
+    s3dis_view_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 's3dis', "view")
+    s3dis_scene_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 's3dis', "scene")
+    scannet_entity_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 'scannet', "entity")
+    scannet_view_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 'scannet', "view")
+    scannet_scene_train_dataset = get_dataset(clip_preprocessor, tokenizer, args, 'scannet', "scene")
+
 
     if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-        val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
+        s3dis_entity_train_sampler = torch.utils.data.distributed.DistributedSampler(s3dis_entity_train_dataset)
+        s3dis_view_train_sampler = torch.utils.data.distributed.DistributedSampler(s3dis_view_train_dataset)
+        s3dis_scene_train_sampler = torch.utils.data.distributed.DistributedSampler(s3dis_scene_train_dataset)
+        scannet_entity_train_sampler = torch.utils.data.distributed.DistributedSampler(scannet_entity_train_dataset)
+        scannet_view_train_sampler = torch.utils.data.distributed.DistributedSampler(scannet_view_train_dataset)
+        scannet_scene_train_sampler = torch.utils.data.distributed.DistributedSampler(scannet_scene_train_dataset)
+        # val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
     else:
-        train_sampler = None
-        val_sampler = None
+        s3dis_entity_train_sampler = None
+        s3dis_view_train_sampler = None
+        s3dis_scene_train_sampler = None
+        scannet_entity_train_sampler = None
+        scannet_view_train_sampler = None
+        scannet_scene_train_sampler = None
+        # val_sampler = None
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True,
-        collate_fn=customized_collate_fn)
+    s3dis_entity_train_loader = torch.utils.data.DataLoader(
+        s3dis_entity_train_dataset, batch_size=args.batch_size, shuffle=(s3dis_entity_train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=s3dis_entity_train_sampler, drop_last=True,
+    )
+    s3dis_view_train_loader = torch.utils.data.DataLoader(
+        s3dis_view_train_dataset, batch_size=args.batch_size, shuffle=(s3dis_view_train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=s3dis_view_train_sampler, drop_last=True,
+    )
+    s3dis_scene_train_loader = torch.utils.data.DataLoader(
+        s3dis_scene_train_dataset, batch_size=args.batch_size, shuffle=(s3dis_scene_train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=s3dis_scene_train_sampler, drop_last=True,
+    )
+    scannet_entity_train_loader = torch.utils.data.DataLoader(
+        scannet_entity_train_dataset, batch_size=args.batch_size, shuffle=(scannet_entity_train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=scannet_entity_train_sampler, drop_last=True,
+    )
+    scannet_view_train_loader = torch.utils.data.DataLoader(
+        scannet_view_train_dataset, batch_size=args.batch_size, shuffle=(scannet_view_train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=scannet_view_train_sampler, drop_last=True,
+    )
+    scannet_scene_train_loader = torch.utils.data.DataLoader(
+        scannet_scene_train_dataset, batch_size=args.batch_size, shuffle=(scannet_scene_train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=scannet_scene_train_sampler, drop_last=True,
+    )
+    
+    # train_loader = torch.utils.data.DataLoader(
+    #     train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+    #     num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True
+    # )
 
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=(val_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=False)
+    # val_loader = torch.utils.data.DataLoader(
+    #     val_dataset, batch_size=args.batch_size, shuffle=(val_sampler is None),
+    #     num_workers=args.workers, pin_memory=True, sampler=val_sampler, drop_last=False)
 
     lr_schedule = utils.cosine_scheduler(args.lr, args.lr_end, args.epochs,
-        len(train_loader) // args.update_freq, warmup_epochs=args.warmup_epochs, start_warmup_value=args.lr_start)
+        (len(s3dis_entity_train_loader) + len(s3dis_view_train_loader) + len(s3dis_scene_train_loader) + len(scannet_entity_train_loader) + len(scannet_view_train_loader) + len(scannet_scene_train_loader)) // args.update_freq, warmup_epochs=args.warmup_epochs, start_warmup_value=args.lr_start)
 
     print(args)
-
-    print("=> beginning training")
 
     best_epoch = -1
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
-            train_sampler.set_epoch(epoch)
+            s3dis_entity_train_sampler.set_epoch(epoch)
+            s3dis_view_train_sampler.set_epoch(epoch)
+            s3dis_scene_train_sampler.set_epoch(epoch)
+            scannet_entity_train_sampler.set_epoch(epoch)
+            scannet_view_train_sampler.set_epoch(epoch)
+            scannet_scene_train_sampler.set_epoch(epoch)
 
-        train_stats = train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, args)
-        val_stats = {"acc1": -1}
+        print("=> beginning s3dis_entity training")
+        s3dis_entity_train_stats = train(s3dis_entity_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'entity', args)
+        print("=> beginning scannet_entity training")
+        scannet_entity_train_stats = train(scannet_entity_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'entity', args)
+        print("=> beginning s3dis_view training")
+        s3dis_view_train_stats = train(s3dis_view_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'view', args)
+        print("=> beginning scannet_view training")
+        scannet_view_train_stats = train(scannet_view_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'view', args)
+        print("=> beginning s3dis_scene training")
+        s3dis_scene_train_stats = train(s3dis_scene_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'scene', args)
+        print("=> beginning scannet_scene training")
+        scannet_scene_train_stats = train(scannet_scene_train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, 'scene', args)
+
+        # val_stats = {"acc1": -1}
 
         if epoch % 1 == 0:
 
-            val_stats = test_zeroshot_3d_core(val_loader, model, tokenizer, args)
-            acc1 = val_stats["acc1"]
-            print(val_stats)
+            # val_stats = test_zeroshot_3d_core(val_loader, model, tokenizer, args)
+            # acc1 = val_stats["acc1"]
+            # print(val_stats)
 
-            is_best = acc1 > best_acc1
-            if is_best:
-                best_epoch = epoch
+            # is_best = acc1 > best_acc1
+            # if is_best:
+            #     best_epoch = epoch
 
-            best_acc1 = max(acc1, best_acc1)
+            # best_acc1 = max(acc1, best_acc1)
 
-            if is_best or epoch % 50 == 0:
+            if epoch % 1 == 0:
                 print("=> saving checkpoint")
                 utils.save_on_master({
                         'epoch': epoch + 1,
                         'state_dict': model.state_dict(),
                         'optimizer' : optimizer.state_dict(),
                         'scaler': scaler.state_dict(),
-                        'best_acc1': best_acc1,
+                        # 'best_acc1': best_acc1,
                         'args': args,
-                    }, is_best, args.output_dir)
+                    }, True, args.output_dir)
 
             if epoch + 1 == args.epochs:
                 print("=> saving last checkpoint")
@@ -241,14 +306,18 @@ def main(args):
                     'state_dict': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'scaler': scaler.state_dict(),
-                    'best_acc1': best_acc1,
+                    # 'best_acc1': best_acc1,
                     'args': args,
-                }, is_best, args.output_dir)
+                }, True, args.output_dir)
 
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in val_stats.items()},
+        log_stats = {**{f's3dis_entity_train_{k}': v for k, v in s3dis_entity_train_stats.items()},
+                    **{f's3dis_view_train_{k}': v for k, v in s3dis_view_train_stats.items()},
+                    **{f's3dis_scene_train_{k}': v for k, v in s3dis_scene_train_stats.items()},
+                    **{f'scannet_entity_train_{k}': v for k, v in scannet_entity_train_stats.items()},
+                    **{f'scannet_view_train_{k}': v for k, v in scannet_view_train_stats.items()},
+                    **{f'scannet_scene_train_{k}': v for k, v in scannet_scene_train_stats.items()},
                      'epoch': epoch,
-                     'best_acc1': best_acc1,
+                    #  'best_acc1': best_acc1,
                      'best_epoch': best_epoch}
 
         if utils.is_main_process():
@@ -259,7 +328,7 @@ def main(args):
                 f.write(json.dumps(log_stats) + '\n')
 
 
-def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, args):
+def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule, level, args):
     batch_time = AverageMeter('Time', ':6.2f')
     data_time = AverageMeter('Data', ':6.2f')
     mem = AverageMeter('Mem (GB)', ':6.1f')
@@ -270,6 +339,10 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
         iters_per_epoch,
         [batch_time, data_time, mem, *metrics.values()],
         prefix="Epoch: [{}]".format(epoch))
+    if level == 'view':
+        outputs = {k: [] for k in ['pc_embed', 'text_embed', 'image_embed', 'logit_scale']}
+    else:
+        outputs = {k: [] for k in ['pc_embed', 'text_embed', 'logit_scale']}
 
     # switch to train mode
     model.train()
@@ -286,27 +359,39 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
         for k, param_group in enumerate(optimizer.param_groups):
             param_group['lr'] = lr_schedule[it]
 
-        pc = inputs[3]
-        texts = inputs[2]
+        pc = inputs[1]
+        texts = inputs[0]
 
-        image = inputs[4]
-        inputs = [pc, texts, image]
+        if level == 'view':
+            image = inputs[2]
+            inputs = [pc, texts, image]
+        else:
+            inputs = [pc, texts]
 
         inputs = [tensor.cuda(args.gpu, non_blocking=True) for tensor in inputs]
 
         # compute output
         with amp.autocast(enabled=not args.disable_amp):
-            outputs = model(*inputs)
-            loss_dict = criterion(outputs)
+            try:
+                output = model(*inputs)
+            except Exception as e:
+                print_log("Error: {}".format(e))
+                continue
+            for k in output.keys():
+                outputs[k].append(output[k])
+            if (data_iter+1)  % 4 != 0:
+                continue
+            outputs = {k: torch.stack(outputs[k], dim=0).squeeze() for k in outputs}
+            loss_dict = criterion(outputs, level)
             loss = loss_dict['loss']
-            loss /= args.update_freq
+            # loss /= args.update_freq
+            outputs = {k: [] for k in outputs}
 
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()))
             sys.exit(1)
 
         scaler.scale(loss).backward()
-
         if (data_iter + 1) % args.update_freq != 0:
             continue
 
@@ -316,9 +401,8 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
         model.zero_grad(set_to_none=True)
 
         # clamp logit scale to [0, 100]
-
-        utils.get_model(model).logit_scale.data.clamp_(0, 4.6052)
-        logit_scale = utils.get_model(model).logit_scale.exp().item()
+        utils.get_model(model).clip_model.logit_scale.data.clamp_(0, 4.6052)
+        logit_scale = utils.get_model(model).clip_model.logit_scale.exp().item()
 
         for k in loss_dict:
             metrics[k].update(loss_dict[k].item(), args.batch_size)
@@ -328,15 +412,14 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
         end = time.time()
 
         mem.update(torch.cuda.max_memory_allocated() // 1e9)
+        # if data_iter % 12 == 0:
+        if args.wandb:
+            wandb.log({**{k: v.item() for k, v in loss_dict.items()},
+                    'scaler': scaler.get_scale(),
+                    'logit': logit_scale})
+        progress.display(optim_iter)
 
-        if optim_iter % args.print_freq == 0:
-            if utils.is_main_process() and args.wandb:
-                wandb.log({**{k: v.item() for k, v in loss_dict.items()},
-                        'scaler': scaler.get_scale(),
-                        'logit': logit_scale})
-            progress.display(optim_iter)
-
-    progress.synchronize()
+    # progress.synchronize()
     return {**{k: v.avg for k, v in metrics.items()},
             'lr': optimizer.param_groups[0]['lr'],
             'logit_scale': logit_scale}
@@ -433,36 +516,36 @@ def test_zeroshot_3d_core(test_loader, model, tokenizer, args=None):
     print('0-shot * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}')
     return {'acc1': top1.avg, 'acc5': top5.avg}
 
-def test_zeroshot_3d(args):
-    ckpt = torch.load(args.test_ckpt_addr, map_location='cpu')
-    state_dict = OrderedDict()
-    for k, v in ckpt['state_dict'].items():
-        state_dict[k.replace('module.', '')] = v
+# def test_zeroshot_3d(args):
+#     ckpt = torch.load(args.test_ckpt_addr, map_location='cpu')
+#     state_dict = OrderedDict()
+#     for k, v in ckpt['state_dict'].items():
+#         state_dict[k.replace('module.', '')] = v
 
-    # create model
-    old_args = ckpt['args']
-    print("=> creating model: {}".format(old_args.model))
-    try:
-        model = getattr(models, old_args.model)(args=args)
-        model.cuda()
-        model.load_state_dict(state_dict, strict=True)
-        print("=> loaded resume checkpoint '{}'".format(args.test_ckpt_addr))
-    except:
-        model = getattr(models, args.model)(args=args)
-        model.cuda()
-        model.load_state_dict(state_dict, strict=True)
-        print("=> loaded resume checkpoint '{}'".format(args.test_ckpt_addr))
+#     # create model
+#     old_args = ckpt['args']
+#     print("=> creating model: {}".format(old_args.model))
+#     try:
+#         model = getattr(models, old_args.model)(args=args)
+#         model.cuda()
+#         model.load_state_dict(state_dict, strict=True)
+#         print("=> loaded resume checkpoint '{}'".format(args.test_ckpt_addr))
+#     except:
+#         model = getattr(models, args.model)(args=args)
+#         model.cuda()
+#         model.load_state_dict(state_dict, strict=True)
+#         print("=> loaded resume checkpoint '{}'".format(args.test_ckpt_addr))
 
-    tokenizer = SimpleTokenizer()
+#     tokenizer = SimpleTokenizer()
 
-    test_dataset = get_dataset(None, tokenizer, args, 'val')
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True, sampler=None, drop_last=False
-    )
-    results = test_zeroshot_3d_core(test_loader, model, tokenizer, args)
+#     test_dataset = get_dataset(None, tokenizer, args, 'val')
+#     test_loader = torch.utils.data.DataLoader(
+#         test_dataset, batch_size=args.batch_size, shuffle=False,
+#         num_workers=args.workers, pin_memory=True, sampler=None, drop_last=False
+#     )
+#     results = test_zeroshot_3d_core(test_loader, model, tokenizer, args)
 
-    return results
+#     return results
 
 
 class AverageMeter(object):
