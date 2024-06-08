@@ -89,7 +89,7 @@ def is_main_process():
 def save_on_master(state, is_best, output_dir):
     if is_main_process():
         # ckpt_path = '{}/checkpoint_{}.pt'.format(output_dir, state['epoch'])
-        best_path = f'{output_dir}/checkpoint_best.pt'
+        best_path = f"{output_dir}/epoch{state['epoch']}_checkpoint.pt"
         # torch.save(state, ckpt_path)
         torch.save(state, best_path)
         # if is_best:

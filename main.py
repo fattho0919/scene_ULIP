@@ -48,7 +48,7 @@ def get_args_parser():
     parser.add_argument('--model', default='ULIP_PN_SSG', type=str)
     parser.add_argument('--clip_model', default='hf-hub:laion/CLIP-ViT-L-14-DataComp.XL-s13B-b90K', type=str)
     # Training
-    parser.add_argument('--epochs', default=250, type=int)
+    parser.add_argument('--epochs', default=10, type=int)
     parser.add_argument('--warmup-epochs', default=1, type=int)
     parser.add_argument('--start-epoch', default=0, type=int)
     parser.add_argument('--batch-size', default=1, type=int,
@@ -231,7 +231,7 @@ def main(args):
             if self.current_dataloader_index in self.exhausted_dataloaders or self.cycle_count == 0:
                 available_dataloaders = [i for i in range(len(self.dataloaders)) if i not in self.exhausted_dataloaders]
                 if not available_dataloaders:
-                    raise ValueError("All dataloaders are exhausted")
+                    return -1
                 self.current_dataloader_index = random.choice(available_dataloaders)
                 self.cycle_count = 4
             return self.dataloader_iters[self.current_dataloader_index]
@@ -241,6 +241,8 @@ def main(args):
         
         def get_data(self):
             dataloader_iter = self.select_dataloader()
+            if dataloader_iter == -1:
+                return []
             batch_list = []
             try:
                 for _ in range(4):
@@ -292,7 +294,7 @@ def main(args):
             # best_acc1 = max(acc1, best_acc1)
 
             if epoch % 1 == 0:
-                print("=> saving checkpoint")
+                print(f"=> saving {epoch + 1} checkpoint")
                 utils.save_on_master({
                         'epoch': epoch + 1,
                         'state_dict': model.state_dict(),
@@ -302,16 +304,16 @@ def main(args):
                         'args': args,
                     }, True, args.output_dir)
 
-            if epoch + 1 == args.epochs:
-                print("=> saving last checkpoint")
-                utils.save_on_master({
-                    'epoch': 'last',
-                    'state_dict': model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'scaler': scaler.state_dict(),
-                    # 'best_acc1': best_acc1,
-                    'args': args,
-                }, True, args.output_dir)
+            # if epoch + 1 == args.epochs:
+            #     print("=> saving last checkpoint")
+            #     utils.save_on_master({
+            #         'epoch': 'last',
+            #         'state_dict': model.state_dict(),
+            #         'optimizer': optimizer.state_dict(),
+            #         'scaler': scaler.state_dict(),
+            #         # 'best_acc1': best_acc1,
+            #         'args': args,
+            #     }, True, args.output_dir)
 
         # log_stats = {**{f's3dis_entity_train_{k}': v for k, v in s3dis_entity_train_stats.items()},
         #             **{f's3dis_view_train_{k}': v for k, v in s3dis_view_train_stats.items()},
@@ -360,6 +362,8 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, lr_schedule,
     end = time.time()
     for data_iter in range(iters_per_epoch):
         inputs_list = train_loader.get_data()
+        if len(inputs_list) == 0:
+            break
         for inputs in inputs_list:
             optim_iter = data_iter // args.update_freq
 
