@@ -295,9 +295,10 @@ def main(args):
 
             if epoch % 1 == 0:
                 print(f"=> saving {epoch + 1} checkpoint")
+                trainable_state_dict = {k: v for k, v in model.state_dict().items() if 'clip_model' not in k}
                 utils.save_on_master({
                         'epoch': epoch + 1,
-                        'state_dict': model.state_dict(),
+                        'state_dict': trainable_state_dict,
                         'optimizer' : optimizer.state_dict(),
                         'scaler': scaler.state_dict(),
                         # 'best_acc1': best_acc1,
